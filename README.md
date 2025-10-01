@@ -45,7 +45,7 @@ Which steps are required to push a custom Docker image to Docker Hub?
 - c) Log in with docker login  
 - d) Push using docker push  
 
-**Answer:** a), c), d)  
+**Answer:** a),d)  
 
 **Q6. (1 mark)**  
 Which command is used to remove all stopped containers at once?  
