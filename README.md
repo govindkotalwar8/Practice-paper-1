@@ -159,11 +159,11 @@ Containerize an application using an httpd container. Create your own HTML files
 **Q18. (6 marks)**  
 Create a new repository on GitHub where the default branch should be `main`. On your local machine, set up a repository with the same default branch (`main`), add multiple files, and push them to the GitHub repository. Ensure the branch alignment between local and remote is correct.  
 
-![GitHub Repo](Q18%20GITHUB.png)  
-![Local Repo](Q18%20LOCAL.png)  
+![GitHub Repo](/IMAGES/Q18GITHUB.png)  
+![Local Repo](/IMAGES/Q18LOCAL.png)
 
 **Q19. (6 marks)**  
 Write Terraform configuration to create 2 EC2 instances in the North Virginia (us-east-1) region. Include all the parameters required to access the instances (AMI, instance type, key pair, security group, etc.). Use best practices such as variable files and separate resource definitions.  
 
-![Terraform Main](Q19%20MAIN.TF.png)  
-![Terraform Variables](Q19%20VARIABEL.TF.png)  
+![Terraform Main](IMAGES/Q19MAIN.TF.png)  
+![Terraform Variables](IMAGES/Q19VARIABEL.TF.png)  
