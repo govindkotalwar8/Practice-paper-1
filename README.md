@@ -166,4 +166,4 @@ Create a new repository on GitHub where the default branch should be `main`. On 
 Write Terraform configuration to create 2 EC2 instances in the North Virginia (us-east-1) region. Include all the parameters required to access the instances (AMI, instance type, key pair, security group, etc.). Use best practices such as variable files and separate resource definitions.  
 
 ![Terraform Main](IMAGES/Q19MAIN.TF.png)  
-![Terraform Variables](IMAGES/Q19VARIABLE.TF.png)  
+![Terraform Variables](IMAGES/Q19VAR.png)  
