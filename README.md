@@ -153,8 +153,8 @@ Which commands are used to undo changes in Git?
 **Q17. (6 marks)**  
 Containerize an application using an httpd container. Create your own HTML files inside the container and serve them. After that, take a backup of the application by creating an image from the running container and upload this custom image to Docker Hub.  
 
-![Docker Setup](Q1%20DOCKER.png)  
-![Docker History](Q1%20DOCKER%20HISTORY.png)  
+![Docker Setup](IMAGES/Q1 DOCKER.png)
+![Docker History](Q1 DOCKER HISTORY.png)  
 
 **Q18. (6 marks)**  
 Create a new repository on GitHub where the default branch should be `main`. On your local machine, set up a repository with the same default branch (`main`), add multiple files, and push them to the GitHub repository. Ensure the branch alignment between local and remote is correct.  
