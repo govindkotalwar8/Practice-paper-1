@@ -2,7 +2,7 @@ name: Trivy Scan
 
 on:
   push:
-    branches: [ main ]
+    branches: [ trivy_scan ]
   pull_request:
 
 jobs:
@@ -19,7 +19,7 @@ jobs:
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
           sudo apt-get update && sudo apt-get install -y jq
 
-      - name: 1. Robust Image Extraction
+      - name: 1. Strict Image Extraction
         run: |
           mkdir -p results
           > results/mapping.txt
@@ -28,49 +28,56 @@ jobs:
             app=$(echo "$file" | cut -d'/' -f2)
             env=$(echo "$file" | cut -d'/' -f3)
 
-            # 1. Capture standard "image: repo:tag" strings
-            yq eval '.. | select(has("image")) | .image | select(tag == "!!str")' "$file" | while read -r img; do
-              [[ -n "$img" && "$img" != "null" ]] && echo "$app|$env|$img" >> results/mapping.txt
-            done
-
-            # 2. Capture Helm-style split "image: {repository: x, tag: y}"
-            yq eval '.. | select(has("image")) | .image | select(has("repository")) | .repository + ":" + .tag' "$file" | while read -r img; do
-              [[ -n "$img" && "$img" != "null:" ]] && echo "$app|$env|$img" >> results/mapping.txt
+            # Extract images (handles both standard string and Helm-style map)
+            # We use a more aggressive yq filter to ensure we only get valid strings
+            yq eval '.. | select(has("image")) | .image | (select(tag == "!!str") // (.repository + ":" + .tag))' "$file" | while read -r img; do
+              # Clean the string: remove quotes, skip nulls/noise
+              img=$(echo "$img" | tr -d '"' | tr -d "'")
+              if [[ -n "$img" && "$img" != "null" && "$img" != "null:null" ]]; then
+                echo "$app|$env|$img" >> results/mapping.txt
+              fi
             done
           done
 
-      - name: 2. Parallel Scan (Isolated Cache)
+      - name: 2. Create Scan Script
         run: |
-          # Download DB once to a master location
-          mkdir -p .trivy_master_cache
-          trivy image --download-db-only --cache-dir .trivy_master_cache --quiet
+          cat << 'EOF' > scan_image.sh
+          #!/bin/bash
+          img=$1
+          # Create a safe filename for the result
+          safe_name=$(echo "$img" | tr -dc '[:alnum:]')
+          output_file="results/scan_${safe_name}.json"
+          
+          # Run Trivy with a timeout
+          # We point to a single cache; --skip-db-update allows multiple readers
+          trivy image --skip-db-update --cache-dir .trivy_cache \
+            --format json --quiet --severity HIGH,CRITICAL \
+            "$img" > "$output_file" 2>/dev/null || echo "{\"Results\":[]}" > "$output_file"
+          
+          # Extract counts
+          crit=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' "$output_file" 2>/dev/null || echo 0)
+          high=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="HIGH")] | length' "$output_file" 2>/dev/null || echo 0)
+          
+          echo "$img|$crit|$high" >> results/scan_data.txt
+          EOF
+          chmod +x scan_image.sh
 
+      - name: 3. Parallel Scan
+        run: |
+          # 1. Prepare global cache once
+          mkdir -p .trivy_cache
+          trivy image --download-db-only --cache-dir .trivy_cache --quiet
+
+          # 2. Get unique images
           sort -u -k3,3 -t'|' results/mapping.txt | cut -d'|' -f3 > results/unique_images.txt
 
-          # Scan with isolated caches to prevent filesystem locks
-          # We use a temp file per process to avoid I/O race conditions
-          cat results/unique_images.txt | xargs -I {} -P 4 sh -c '
-            img="{}"
-            # Create a dedicated temp cache for THIS process only
-            job_cache=$(mktemp -d)
-            cp -r .trivy_master_cache/* "$job_cache/"
-            
-            res=$(trivy image --skip-db-update --cache-dir "$job_cache" --format json --quiet --severity HIGH,CRITICAL "$img" || echo "{\"Results\":[]}")
-            
-            # Cleanup temp cache immediately
-            rm -rf "$job_cache"
+          # 3. Use xargs to run our STABLE script
+          # Limit to -P 2 for better stability on GitHub standard runners
+          cat results/unique_images.txt | xargs -n 1 -P 2 ./scan_image.sh
 
-            crit=$(echo "$res" | jq "[.Results[].Vulnerabilities[]? | select(.Severity==\"CRITICAL\")] | length" 2>/dev/null || echo 0)
-            high=$(echo "$res" | jq "[.Results[].Vulnerabilities[]? | select(.Severity==\"HIGH\")] | length" 2>/dev/null || echo 0)
-            
-            # Write to a unique file to avoid I/O collisions
-            echo "$img|$crit|$high" >> "results/scan_$(echo "$img" | tr -dc "[:alnum:]").txt"
-          '
-          # Merge results into one file
-          cat results/scan_*.txt > results/scan_data.txt
-
-      - name: 3. Assemble Final JSON
+      - name: 4. Assemble Final JSON
         run: |
+          # The JQ slurp logic to build the nested object
           jq -n \
             --slurpfile mapping <(cat results/mapping.txt | jq -R 'split("|") | {app:.[0], env:.[1], img:.[2]}') \
             --slurpfile scans <(cat results/scan_data.txt | jq -R 'split("|") | {img:.[0], crit:.[1], high:.[2]}') \
@@ -81,9 +88,9 @@ jobs:
             )
             ' > results/final_report.json
 
-      - name: 4. Display & Upload
+      - name: 5. Display & Upload
         run: |
-          echo "==== Scan Summary ===="
+          echo "==== Final Scan Summary ===="
           cat results/final_report.json
           
       - name: Upload Artifact
