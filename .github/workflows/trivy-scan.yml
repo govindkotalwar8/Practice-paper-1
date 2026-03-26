@@ -2,7 +2,7 @@ name: Nested Trivy Scan
 
 on:
   push:
-    branches: [ trivy_scan ]
+    branches: [ main ]
   pull_request:
 
 jobs:
