@@ -1,0 +1,18 @@
+apiVersion: helm.toolkit.fluxcd.io/v2beta1
+kind: HelmRelease
+metadata:
+  name: app2
+  namespace: app2
+spec:
+  chart:
+    spec:
+      chart: app2-chart
+      version: 0.1.0
+      sourceRef:
+        kind: GitRepository
+        name: app2-repo
+        namespace: flux-system
+  values:
+    image:
+      repository: postgres
+      tag: 17.4

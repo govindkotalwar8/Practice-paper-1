@@ -1,0 +1,71 @@
+name: Nested Trivy Scan
+
+on:
+  push:
+    branches: [ trivy_scan ]
+  pull_request:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
+
+      - name: 1. Extract Mapping & Scan Images
+        run: |
+          mkdir -p results
+          
+          # Find images and create a mapping: app|env|image
+          # We use yq (pre-installed) to grab images from any K8s or Helm-like structure
+          find . -type f \( -name "*.yaml" -o -name "*.yml" \) | while read -r file; do
+            app=$(basename "$(dirname "$file")")
+            [[ "$file" == *"dev"* ]] && env="dev" || { [[ "$file" == *"prod"* ]] && env="prod" || env="unknown"; }
+            
+            # Extract images and save mapping
+            yq eval '.. | select(has("image")) | .image | select(. != null)' "$file" | while read -r img; do
+              [ -n "$img" ] && echo "$app|$env|$img" >> results/mapping.txt
+            done
+          done
+
+          # Get unique images to avoid scanning the same thing twice
+          cut -d'|' -f3 results/mapping.txt | sort -u > results/unique_images.txt
+
+          # Pre-download DB once to avoid parallel lock/network issues
+          trivy image --download-db-only --quiet
+
+          # Scan unique images in parallel (4 at a time)
+          cat results/unique_images.txt | xargs -I {} -P 4 sh -c '
+            img="{}"
+            res=$(trivy image --skip-db-update --format json --quiet --severity HIGH,CRITICAL "$img")
+            crit=$(echo "$res" | jq "[.Results[].Vulnerabilities[]? | select(.Severity==\"CRITICAL\")] | length")
+            high=$(echo "$res" | jq "[.Results[].Vulnerabilities[]? | select(.Severity==\"HIGH\")] | length")
+            echo "$img|$crit|$high" >> results/scan_data.txt
+          '
+
+      - name: 2. Generate Final Nested JSON
+        run: |
+          # This JQ magic joins the mapping with the scan counts into your nested format
+          jq -n -R '
+            # Load mappings and scan data into memory
+            [ [ inputs | select(filename=="results/mapping.txt") | split("|") | {app: .[0], env: .[1], img: .[2]} ],
+              [ inputs | select(filename=="results/scan_data.txt") | split("|") | {img: .[0], crit: .[1], high: .[2]} ] ] as $data |
+            
+            $data[0] as $mappings |
+            $data[1] as $scans |
+
+            # Build the nested object
+            reduce $mappings[] as $m ({};
+              ($scans | .[] | select(.img == $m.img)) as $s |
+              .[$m.app][$m.env] = {"critical": ($s.crit|tonumber), "high": ($s.high|tonumber)}
+            )
+          ' results/mapping.txt results/scan_data.txt > results/final_report.json
+
+      - name: Upload Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-nested-report
+          path: results/final_report.json
