@@ -24,7 +24,6 @@ jobs:
       # PART 1: EXTRACT UNIQUE IMAGES
       # ==========================================
       - name: Step 1 - Image Extraction
-        id: extraction
         run: |
           python << 'EOF'
           import os, yaml, json
@@ -34,13 +33,13 @@ jobs:
               if isinstance(data, dict):
                   for k, v in data.items():
                       if k == "image":
-                          # Fix: Force string conversion to handle floats/ints
                           if isinstance(v, (str, int, float)):
                               images.append(str(v).strip())
                           elif isinstance(v, dict):
                               repo = str(v.get("repository", "")).strip()
                               tag = str(v.get("tag", "")).strip()
-                              if repo and tag: images.append(f"{repo}:{tag}")
+                              if repo and tag:
+                                  images.append(f"{repo}:{tag}")
                       else:
                           images.extend(extract_images(v))
               elif isinstance(data, list):
@@ -52,68 +51,102 @@ jobs:
           unique_images = set()
 
           if not os.path.exists("deployments"):
-              print("No 'deployments' directory found. Skipping.")
+              print("[INFO] No 'deployments' directory found. Skipping.")
           else:
               for root, _, files in os.walk("deployments"):
                   for file in files:
                       if file.endswith((".yaml", ".yml")):
                           rel = os.path.relpath(root, "deployments").split(os.sep)
-                          if len(rel) < 2: continue
+
+                          if len(rel) < 2:
+                              print(f"[WARN] Skipping invalid path: {root}")
+                              continue
+
                           app, env = rel[0], rel[1]
+
                           try:
                               with open(os.path.join(root, file)) as f:
                                   for doc in yaml.safe_load_all(f):
-                                      if not doc: continue
+                                      if not doc:
+                                          continue
                                       for img in extract_images(doc):
                                           if img and img.lower() != "none":
                                               mapping.append({"app": app, "env": env, "image": img})
                                               unique_images.add(img)
-                          except Exception as e: print(f"Error parsing {file}: {e}")
+                          except Exception as e:
+                              print(f"[ERROR] Error parsing {file}: {e}")
 
-          with open("results/mapping.json", "w") as f: json.dump(mapping, f)
-          with open("results/unique_images.json", "w") as f: json.dump(list(unique_images), f)
-          print(f"Found {len(unique_images)} unique images across {len(mapping)} deployments.")
+          with open("results/mapping.json", "w") as f:
+              json.dump(mapping, f)
+
+          with open("results/unique_images.json", "w") as f:
+              json.dump(list(unique_images), f)
+
+          if not unique_images:
+              print("[INFO] No container images found in deployments directory.")
+          else:
+              print(f"[INFO] Found {len(unique_images)} unique images across {len(mapping)} deployments.")
           EOF
 
       # ==========================================
-      # PART 2: SCAN UNIQUE IMAGES (NO DUPLICATES)
+      # PART 2: SCAN UNIQUE IMAGES
       # ==========================================
       - name: Step 2 - Parallel Scanning
         run: |
           python << 'EOF'
-          import json, subprocess, os
+          import json, subprocess
           from concurrent.futures import ThreadPoolExecutor
 
           with open("results/unique_images.json") as f:
               unique_images = json.load(f)
 
           if not unique_images:
-              print("No images to scan.")
-              with open("results/scan_results.json", "w") as f: json.dump({}, f)
+              print("[INFO] No images to scan.")
+              with open("results/scan_results.json", "w") as f:
+                  json.dump({}, f)
               exit(0)
 
-          # Download DB once before parallel threads start
           subprocess.run(["trivy", "image", "--download-db-only", "--quiet"], check=True)
 
           def scan(img):
-              print(f"Scanning: {img}")
-              cmd = ["trivy", "image", "--format", "json", "--quiet", "--severity", "HIGH,CRITICAL", img]
-              try:
-                  res = subprocess.run(cmd, capture_output=True, text=True)
-                  data = json.loads(res.stdout)
-                  c_count = 0
-                  h_count = 0
-                  for r in data.get("Results", []):
-                      for v in r.get("Vulnerabilities", []):
-                          sev = v.get("Severity")
-                          if sev == "CRITICAL": c_count += 1
-                          elif sev == "HIGH": h_count += 1
-                  return img, {"critical": c_count, "high": h_count}
-              except Exception as e:
-                  print(f"Error scanning {img}: {e}")
-                  return img, {"critical": 0, "high": 0}
+              print(f"[INFO] Scanning: {img}")
+              cmd = [
+                  "trivy", "image",
+                  "--format", "json",
+                  "--quiet",
+                  "--severity", "HIGH,CRITICAL",
+                  "--cache-dir", ".trivy_cache",
+                  img
+              ]
 
-          # Using 2 workers to avoid registry rate limits
+              for attempt in range(2):
+                  try:
+                      res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+                      if not res.stdout.strip():
+                          print(f"[WARN] Empty result for {img}")
+                          return img, {"critical": 0, "high": 0}
+
+                      data = json.loads(res.stdout)
+
+                      c_count = 0
+                      h_count = 0
+
+                      for r in data.get("Results", []):
+                          for v in r.get("Vulnerabilities", []):
+                              sev = v.get("Severity")
+                              if sev == "CRITICAL":
+                                  c_count += 1
+                              elif sev == "HIGH":
+                                  h_count += 1
+
+                      return img, {"critical": c_count, "high": h_count}
+
+                  except Exception as e:
+                      print(f"[ERROR] Attempt {attempt+1} failed for {img}: {e}")
+
+              return img, {"critical": 0, "high": 0}
+
           with ThreadPoolExecutor(max_workers=2) as exe:
               results = dict(exe.map(scan, unique_images))
 
@@ -131,13 +164,17 @@ jobs:
           from collections import defaultdict
 
           try:
-              with open("results/mapping.json") as f: mapping = json.load(f)
-              with open("results/scan_results.json") as f: scans = json.load(f)
+              with open("results/mapping.json") as f:
+                  mapping = json.load(f)
+              with open("results/scan_results.json") as f:
+                  scans = json.load(f)
           except FileNotFoundError:
-              print("Required data files not found.")
+              print("[ERROR] Required data files not found.")
               exit(0)
 
           report = defaultdict(lambda: defaultdict(lambda: {"critical": 0, "high": 0, "images": []}))
+
+          total_critical = 0
 
           for item in mapping:
               app, env, img = item['app'], item['env'], item['image']
@@ -145,12 +182,21 @@ jobs:
 
               report[app][env]["critical"] += res["critical"]
               report[app][env]["high"] += res["high"]
+
+              total_critical += res["critical"]
+
               if img not in report[app][env]["images"]:
                   report[app][env]["images"].append(img)
 
           with open("results/final_report.json", "w") as f:
               json.dump(report, f, indent=2)
+
           print(json.dumps(report, indent=2))
+
+          # Optional: Fail pipeline if critical vulnerabilities found
+          if total_critical > 0:
+              print(f"[ERROR] Found {total_critical} CRITICAL vulnerabilities.")
+              exit(1)
           EOF
 
       - name: Upload Artifact
