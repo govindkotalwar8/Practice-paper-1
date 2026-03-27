@@ -15,4 +15,4 @@ spec:
     spec:
       containers:
       - name: app1-container
-        image: postgres:17.4
+        image: python:3.4-slim
