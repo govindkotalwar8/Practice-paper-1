@@ -33,7 +33,11 @@ jobs:
           find deployments -type f \( -name "*.yaml" -o -name "*.yml" \) | while read -r file; do
 
             # Extract app and env safely
-            IFS='/' read -r _ app env _ <<< "$file"
+            rel_path="${file#deployments/}"
+            IFS='/' read -ra parts <<< "$rel_path"
+
+            app="${parts[0]}"
+            env="${parts[1]}"
 
             # Extract images
             yq eval '.. | select(has("image")) | .image | (select(tag == "!!str") // (.repository + ":" + .tag))' "$file" | while read -r img; do
