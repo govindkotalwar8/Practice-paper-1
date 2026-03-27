@@ -2,7 +2,7 @@ name: Trivy Scan
 
 on:
   push:
-    branches: [ main ]
+    branches: [ trivy_scan ]
   pull_request:
 
 jobs:
@@ -13,99 +13,134 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Tools
+      - name: Install Trivy & Dependencies
         run: |
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | \
           sudo sh -s -- -b /usr/local/bin v0.69.3
-          sudo apt-get update && sudo apt-get install -y jq
-          sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
-          sudo chmod +x /usr/local/bin/yq
+          pip install pyyaml
 
-      - name: Image Extraction
+      - name: Run Python Security Suite
         run: |
-          mkdir -p results
-          > results/mapping.txt
+          python << 'EOF'
+          import os
+          import yaml
+          import subprocess
+          import json
+          import hashlib
+          from concurrent.futures import ThreadPoolExecutor
+          from collections import defaultdict
 
-          find deployments -type f \( -name "*.yaml" -o -name "*.yml" \) | while read -r file; do
+          # --- CONFIGURATION ---
+          BASE_DIR = "deployments"
+          RESULTS_DIR = "results"
+          os.makedirs(RESULTS_DIR, exist_ok=True)
 
-            app=$(echo "$file" | cut -d'/' -f2)
-            env=$(echo "$file" | cut -d'/' -f3)
+          def get_safe_hash(text):
+              return hashlib.md5(text.encode()).hexdigest()
 
-            yq eval '.. | select(has("image")) | .image | (select(tag == "!!str") // (.repository + ":" + .tag))' "$file" | while read -r img; do
+          def extract_images(data):
+              images = []
+              if isinstance(data, dict):
+                  for k, v in data.items():
+                      if k == "image":
+                          if isinstance(v, str): images.append(v)
+                          elif isinstance(v, dict):
+                              repo, tag = v.get("repository", ""), v.get("tag", "")
+                              if repo and tag: images.append(f"{repo}:{tag}")
+                      else:
+                          images.extend(extract_images(v))
+              elif isinstance(data, list):
+                  for item in data: images.extend(extract_images(item))
+              return images
 
-              img=$(echo "$img" | tr -d '"' | tr -d "'")
+          # 1. SCAN FILESYSTEM FOR IMAGES
+          mapping = [] # List of (app, env, image)
+          unique_images = set()
 
-              if [[ -n "$img" && "$img" != "null" && "$img" != "null:null" ]]; then
-                echo "$app|$env|$img" >> results/mapping.txt
-              fi
-            done
-          done
+          for root, _, files in os.walk(BASE_DIR):
+              for file in files:
+                  if file.endswith((".yaml", ".yml")):
+                      rel_path = os.path.relpath(root, BASE_DIR).split(os.sep)
+                      if len(rel_path) < 2: continue
+                      
+                      app, env = rel_path[0], rel_path[1]
+                      try:
+                          with open(os.path.join(root, file), "r") as f:
+                              docs = yaml.safe_load_all(f)
+                              for doc in docs:
+                                  if not doc: continue
+                                  for img in extract_images(doc):
+                                      if img and img not in ["null", "null:null"]:
+                                          mapping.append((app, env, img))
+                                          unique_images.add(img)
+                      except Exception as e:
+                          print(f"Error reading {file}: {e}")
 
-          sort -u results/mapping.txt -o results/mapping.txt
+          # 2. DOWNLOAD TRIVY DB ONCE
+          print("Downloading Trivy DB...")
+          subprocess.run(["trivy", "image", "--download-db-only", "--quiet"], check=True)
 
-      - name: Create Scan Script
-        run: |
-          cat << 'EOF' > scan_image.sh
-          #!/bin/bash
-          img=$1
+          # 3. PARALLEL SCAN FUNCTION
+          def scan_image(img):
+              img_hash = get_safe_hash(img)
+              raw_json = os.path.join(RESULTS_DIR, f"raw_{img_hash}.json")
+              
+              print(f"Scanning: {img}")
+              # Run Trivy command via subprocess
+              cmd = [
+                  "trivy", "image", "--format", "json", "--quiet",
+                  "--severity", "HIGH,CRITICAL", "--no-progress", img
+              ]
+              
+              try:
+                  result = subprocess.run(cmd, capture_output=True, text=True)
+                  data = json.loads(result.stdout)
+                  
+                  # Parse vulnerabilities using Python instead of JQ
+                  crit = 0
+                  high = 0
+                  for res in data.get("Results", []):
+                      for vuln in res.get("Vulnerabilities", []):
+                          sev = vuln.get("Severity")
+                          if sev == "CRITICAL": crit += 1
+                          elif sev == "HIGH": high += 1
+                  
+                  return img, {"critical": crit, "high": high}
+              except Exception as e:
+                  print(f"Failed to scan {img}: {e}")
+                  return img, {"critical": 0, "high": 0}
 
-          safe_name=$(echo "$img" | tr -dc '[:alnum:]')
-          output_file="results/scan_${safe_name}.json"
+          # Execute scans in parallel (2 workers to stay safe with rate limits)
+          print(f"Starting parallel scan for {len(unique_images)} images...")
+          with ThreadPoolExecutor(max_workers=2) as executor:
+              scan_results = dict(executor.map(scan_image, list(unique_images)))
 
-          # Run scan with timeout and logging
-          timeout 5m trivy image \
-            --skip-db-update \
-            --cache-dir .trivy_cache \
-            --format json \
-            --quiet \
-            --severity HIGH,CRITICAL \
-            "$img" > "$output_file" 2>> results/errors.log \
-            || echo "{\"Results\":[]}" > "$output_file"
+          # 4. AGGREGATE FINAL REPORT
+          final_report = defaultdict(lambda: defaultdict(lambda: {
+              "total_critical": 0,
+              "total_high": 0,
+              "images": []
+          }))
 
-          # Extract vulnerability counts
-          crit=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' "$output_file" 2>/dev/null || echo 0)
-          high=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="HIGH")] | length' "$output_file" 2>/dev/null || echo 0)
+          for app, env, img in mapping:
+              stats = scan_results.get(img, {"critical": 0, "high": 0})
+              entry = final_report[app][env]
 
-          echo "$img|$crit|$high" >> results/scan_data.txt
+              entry["total_critical"] += stats["critical"]
+              entry["total_high"] += stats["high"]
+              if img not in entry["images"]:
+                  entry["images"].append(img)
+
+          # 5. SAVE OUTPUT
+          with open(os.path.join(RESULTS_DIR, "final_report.json"), "w") as f:
+              json.dump(final_report, f, indent=2)
+
+          print("\n--- SCAN COMPLETE ---")
+          print(json.dumps(final_report, indent=2))
           EOF
-
-          chmod +x scan_image.sh
-
-      - name: Parallel Scan
-        run: |
-          mkdir -p .trivy_cache
-          mkdir -p results
-
-          # Download DB once
-          trivy image --download-db-only --cache-dir .trivy_cache --quiet
-
-          # Get unique images
-          cut -d'|' -f3 results/mapping.txt | sort -u > results/unique_images.txt
-
-          # Run scans (controlled parallelism)
-          cat results/unique_images.txt | xargs -n 1 -P 2 ./scan_image.sh
-
-      - name: Assemble Final JSON
-        run: |
-          jq -n \
-            --slurpfile mapping <(cat results/mapping.txt | jq -R 'split("|") | {app:.[0], env:.[1], img:.[2]}') \
-            --slurpfile scans <(cat results/scan_data.txt | jq -R 'split("|") | {img:.[0], crit:.[1], high:.[2]}') \
-            '
-            reduce $mapping[] as $m ({};
-              ($scans[] | select(.img == $m.img)) as $s |
-              .[$m.app][$m.env] = {
-                "critical": ($s.crit|tonumber),
-                "high": ($s.high|tonumber)
-              }
-            )
-            ' > results/final_report.json
-
-      - name: 5. Display Report
-        run: |
-          cat results/final_report.json
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: trivy-report
+          name: trivy-security-report
           path: results/final_report.json
