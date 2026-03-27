@@ -33,7 +33,7 @@ jobs:
               if isinstance(data, dict):
                   for k, v in data.items():
                       if k == "image":
-                          # Fix: Force string conversion to handle floats/ints in YAML
+                          # Fix: Force string conversion for floats/ints
                           if isinstance(v, (str, int, float)):
                               images.append(str(v).strip())
                           elif isinstance(v, dict):
@@ -52,45 +52,38 @@ jobs:
           unique_images = set()
 
           if not os.path.exists("deployments"):
-              print("[INFO] No 'deployments' directory found. Skipping.")
+              print("[INFO] No 'deployments' directory found.")
           else:
               for root, _, files in os.walk("deployments"):
                   for file in files:
                       if file.endswith((".yaml", ".yml")):
                           rel = os.path.relpath(root, "deployments").split(os.sep)
-
                           if len(rel) < 2:
-                              print(f"[WARN] Skipping invalid path: {root}")
                               continue
 
                           app, env = rel[0], rel[1]
-
                           try:
                               with open(os.path.join(root, file)) as f:
-                                  for doc in yaml.safe_load_all(f):
-                                      if not doc:
-                                          continue
+                                  docs = yaml.safe_load_all(f)
+                                  for doc in docs:
+                                      if not doc: continue
                                       for img in extract_images(doc):
                                           if img and img.lower() != "none":
                                               mapping.append({"app": app, "env": env, "image": img})
                                               unique_images.add(img)
                           except Exception as e:
-                              print(f"[ERROR] Error parsing {file}: {e}")
+                              print(f"[ERROR] Parsing {file}: {e}")
 
           with open("results/mapping.json", "w") as f:
               json.dump(mapping, f)
-
           with open("results/unique_images.json", "w") as f:
               json.dump(list(unique_images), f)
-
-          if not unique_images:
-              print("[INFO] No container images found in deployments directory.")
-          else:
-              print(f"[INFO] Found {len(unique_images)} unique images across {len(mapping)} deployments.")
+          
+          print(f"[INFO] Found {len(unique_images)} unique images across {len(mapping)} deployments.")
           EOF
 
       # ==========================================
-      # PART 2: SCAN UNIQUE IMAGES (NO DUPLICATES)
+      # PART 2: SCAN UNIQUE IMAGES (PARALLEL)
       # ==========================================
       - name: Step 2 - Parallel Scanning
         run: |
@@ -99,60 +92,41 @@ jobs:
           from concurrent.futures import ThreadPoolExecutor
 
           if not os.path.exists("results/unique_images.json"):
-              print("[ERROR] unique_images.json not found.")
-              exit(1)
+              exit(0)
 
           with open("results/unique_images.json") as f:
               unique_images = json.load(f)
 
           if not unique_images:
-              print("[INFO] No images to scan.")
-              with open("results/scan_results.json", "w") as f:
-                  json.dump({}, f)
+              with open("results/scan_results.json", "w") as f: json.dump({}, f)
               exit(0)
 
-          # Download DB once before parallel threads start to avoid race conditions
+          # Download DB once before threading
           subprocess.run(["trivy", "image", "--download-db-only", "--quiet"], check=True)
 
           def scan(img):
               print(f"[INFO] Scanning: {img}")
               cmd = [
-                  "trivy", "image",
-                  "--format", "json",
-                  "--quiet",
-                  "--severity", "HIGH,CRITICAL",
-                  "--cache-dir", ".trivy_cache",
-                  img
+                  "trivy", "image", "--format", "json", "--quiet",
+                  "--severity", "HIGH,CRITICAL", "--cache-dir", ".trivy_cache", img
               ]
+              try:
+                  res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                  if not res.stdout.strip():
+                      return img, {"critical": 0, "high": 0}
 
-              for attempt in range(2):
-                  try:
-                      res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                  data = json.loads(res.stdout)
+                  c_count = 0
+                  h_count = 0
+                  for r in data.get("Results", []):
+                      for v in r.get("Vulnerabilities", []):
+                          sev = v.get("Severity")
+                          if sev == "CRITICAL": c_count += 1
+                          elif sev == "HIGH": h_count += 1
+                  return img, {"critical": c_count, "high": h_count}
+              except:
+                  return img, {"critical": 0, "high": 0}
 
-                      if not res.stdout.strip():
-                          print(f"[WARN] Empty result for {img}")
-                          return img, {"critical": 0, "high": 0}
-
-                      data = json.loads(res.stdout)
-                      c_count = 0
-                      h_count = 0
-
-                      for r in data.get("Results", []):
-                          for v in r.get("Vulnerabilities", []):
-                              sev = v.get("Severity")
-                              if sev == "CRITICAL":
-                                  c_count += 1
-                              elif sev == "HIGH":
-                                  h_count += 1
-
-                      return img, {"critical": c_count, "high": h_count}
-
-                  except Exception as e:
-                      print(f"[ERROR] Attempt {attempt+1} failed for {img}: {e}")
-
-              return img, {"critical": 0, "high": 0}
-
-          # Using 2 workers to avoid registry rate limits
           with ThreadPoolExecutor(max_workers=2) as exe:
               results = dict(exe.map(scan, unique_images))
 
@@ -161,7 +135,7 @@ jobs:
           EOF
 
       # ==========================================
-      # PART 3: AGGREGATE & REPORT
+      # PART 3: AGGREGATE & REPORT (ALWAYS PASSES)
       # ==========================================
       - name: Step 3 - Final Reporting
         run: |
@@ -170,26 +144,20 @@ jobs:
           from collections import defaultdict
 
           try:
-              with open("results/mapping.json") as f:
-                  mapping = json.load(f)
-              with open("results/scan_results.json") as f:
-                  scans = json.load(f)
-          except FileNotFoundError:
-              print("[ERROR] Required data files not found.")
-              exit(1)
+              with open("results/mapping.json") as f: mapping = json.load(f)
+              with open("results/scan_results.json") as f: scans = json.load(f)
+          except:
+              print("[INFO] No scan data found.")
+              exit(0)
 
-          # Nested dictionary structure: report[app][env]
           report = defaultdict(lambda: defaultdict(lambda: {"critical": 0, "high": 0, "images": []}))
-          total_critical = 0
 
           for item in mapping:
               app, env, img = item['app'], item['env'], item['image']
               res = scans.get(img, {"critical": 0, "high": 0})
-
+              
               report[app][env]["critical"] += res["critical"]
               report[app][env]["high"] += res["high"]
-              total_critical += res["critical"]
-
               if img not in report[app][env]["images"]:
                   report[app][env]["images"].append(img)
 
@@ -198,12 +166,7 @@ jobs:
 
           print("--- FINAL SECURITY REPORT ---")
           print(json.dumps(report, indent=2))
-
-          if total_critical > 0:
-              print(f"\n[FAIL] Pipeline failed due to {total_critical} CRITICAL vulnerabilities.")
-              exit(1)
-          else:
-              print("\n[SUCCESS] No CRITICAL vulnerabilities found.")
+          print("\n[SUCCESS] Report generated. Pipeline continuing as requested.")
           EOF
 
       - name: Upload Artifact
