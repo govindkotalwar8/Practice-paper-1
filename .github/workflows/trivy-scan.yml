@@ -18,7 +18,7 @@ jobs:
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | \
           sudo sh -s -- -b /usr/local/bin v0.69.3
           pip install pyyaml
-          mkdir -p results .trivy_cache
+          mkdir -p results
 
       # ==========================================
       # STEP 1: EXTRACT IMAGES
@@ -97,12 +97,12 @@ jobs:
           EOF
 
       # ==========================================
-      # STEP 2: SCAN IMAGES (FIXED CONCURRENCY)
+      # STEP 2: SCAN IMAGES (ISOLATED CACHE FIX)
       # ==========================================
       - name: Step 2 - Parallel Scanning
         run: |
           python << 'EOF'
-          import json, subprocess, os, logging
+          import json, subprocess, os, logging, tempfile, shutil
           from concurrent.futures import ThreadPoolExecutor, as_completed
 
           logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
@@ -118,18 +118,22 @@ jobs:
                   json.dump({}, f)
               exit(0)
 
+          # Download DB once
           subprocess.run(["trivy", "image", "--download-db-only", "--quiet"], check=True)
 
           max_workers = min(4, os.cpu_count() or 2)
 
           def scan(img):
               logging.info(f"Scanning: {img}")
+
+              cache_dir = tempfile.mkdtemp()
+
               cmd = [
                   "trivy", "image",
                   "--format", "json",
                   "--quiet",
                   "--severity", "HIGH,CRITICAL",
-                  "--cache-dir", ".trivy_cache",
+                  "--cache-dir", cache_dir,
                   img
               ]
 
@@ -163,6 +167,9 @@ jobs:
                   logging.error(f"Scan failed for {img}: {e}")
                   return img, {"critical": 0, "high": 0}
 
+              finally:
+                  shutil.rmtree(cache_dir, ignore_errors=True)
+
           results = {}
 
           with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -177,7 +184,7 @@ jobs:
                       logging.error(f"[FATAL] Future failed for {img}: {e}")
                       results[img] = {"critical": 0, "high": 0}
 
-          # 🔍 VALIDATION
+          # Validation
           if len(results) != len(unique_images):
               logging.warning(f"Mismatch: expected {len(unique_images)}, got {len(results)}")
               missing = set(unique_images) - set(results.keys())
@@ -191,7 +198,7 @@ jobs:
           EOF
 
       # ==========================================
-      # STEP 3: REPORT
+      # STEP 3: FINAL REPORT
       # ==========================================
       - name: Step 3 - Final Reporting
         run: |
