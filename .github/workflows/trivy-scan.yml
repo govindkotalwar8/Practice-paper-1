@@ -34,32 +34,41 @@ jobs:
               if isinstance(data, dict):
                   for k, v in data.items():
                       if k == "image":
-                          if isinstance(v, str): images.append(v.strip())
+                          # Fix: Force string conversion to handle floats/ints
+                          if isinstance(v, (str, int, float)):
+                              images.append(str(v).strip())
                           elif isinstance(v, dict):
-                              repo, tag = v.get("repository", ""), v.get("tag", "")
-                              if repo and tag: images.append(f"{repo.strip()}:{tag.strip()}")
-                      else: images.extend(extract_images(v))
+                              repo = str(v.get("repository", "")).strip()
+                              tag = str(v.get("tag", "")).strip()
+                              if repo and tag: images.append(f"{repo}:{tag}")
+                      else:
+                          images.extend(extract_images(v))
               elif isinstance(data, list):
-                  for item in data: images.extend(extract_images(item))
+                  for item in data:
+                      images.extend(extract_images(item))
               return images
 
           mapping = []
           unique_images = set()
 
-          for root, _, files in os.walk("deployments"):
-              for file in files:
-                  if file.endswith((".yaml", ".yml")):
-                      rel = os.path.relpath(root, "deployments").split(os.sep)
-                      if len(rel) < 2: continue
-                      app, env = rel[0], rel[1]
-                      try:
-                          with open(os.path.join(root, file)) as f:
-                              for doc in yaml.safe_load_all(f):
-                                  if not doc: continue
-                                  for img in extract_images(doc):
-                                      mapping.append({"app": app, "env": env, "image": img})
-                                      unique_images.add(img)
-                      except Exception as e: print(f"Error: {e}")
+          if not os.path.exists("deployments"):
+              print("No 'deployments' directory found. Skipping.")
+          else:
+              for root, _, files in os.walk("deployments"):
+                  for file in files:
+                      if file.endswith((".yaml", ".yml")):
+                          rel = os.path.relpath(root, "deployments").split(os.sep)
+                          if len(rel) < 2: continue
+                          app, env = rel[0], rel[1]
+                          try:
+                              with open(os.path.join(root, file)) as f:
+                                  for doc in yaml.safe_load_all(f):
+                                      if not doc: continue
+                                      for img in extract_images(doc):
+                                          if img and img.lower() != "none":
+                                              mapping.append({"app": app, "env": env, "image": img})
+                                              unique_images.add(img)
+                          except Exception as e: print(f"Error parsing {file}: {e}")
 
           with open("results/mapping.json", "w") as f: json.dump(mapping, f)
           with open("results/unique_images.json", "w") as f: json.dump(list(unique_images), f)
@@ -78,6 +87,11 @@ jobs:
           with open("results/unique_images.json") as f:
               unique_images = json.load(f)
 
+          if not unique_images:
+              print("No images to scan.")
+              with open("results/scan_results.json", "w") as f: json.dump({}, f)
+              exit(0)
+
           # Download DB once before parallel threads start
           subprocess.run(["trivy", "image", "--download-db-only", "--quiet"], check=True)
 
@@ -87,18 +101,19 @@ jobs:
               try:
                   res = subprocess.run(cmd, capture_output=True, text=True)
                   data = json.loads(res.stdout)
-                  crit = sum(len(r.get("Vulnerabilities", [])) for r in data.get("Results", []) if r)
-                  # Filtering for HIGH/CRITICAL is already handled by Trivy flag,
-                  # but we double check severity in Python for accuracy:
                   c_count = 0
                   h_count = 0
                   for r in data.get("Results", []):
                       for v in r.get("Vulnerabilities", []):
-                          if v.get("Severity") == "CRITICAL": c_count += 1
-                          if v.get("Severity") == "HIGH": h_count += 1
+                          sev = v.get("Severity")
+                          if sev == "CRITICAL": c_count += 1
+                          elif sev == "HIGH": h_count += 1
                   return img, {"critical": c_count, "high": h_count}
-              except: return img, {"critical": 0, "high": 0}
+              except Exception as e:
+                  print(f"Error scanning {img}: {e}")
+                  return img, {"critical": 0, "high": 0}
 
+          # Using 2 workers to avoid registry rate limits
           with ThreadPoolExecutor(max_workers=2) as exe:
               results = dict(exe.map(scan, unique_images))
 
@@ -115,8 +130,12 @@ jobs:
           import json
           from collections import defaultdict
 
-          with open("results/mapping.json") as f: mapping = json.load(f)
-          with open("results/scan_results.json") as f: scans = json.load(f)
+          try:
+              with open("results/mapping.json") as f: mapping = json.load(f)
+              with open("results/scan_results.json") as f: scans = json.load(f)
+          except FileNotFoundError:
+              print("Required data files not found.")
+              exit(0)
 
           report = defaultdict(lambda: defaultdict(lambda: {"critical": 0, "high": 0, "images": []}))
 
