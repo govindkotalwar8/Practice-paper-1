@@ -21,7 +21,7 @@ jobs:
           mkdir -p results .trivy_cache
 
       # ==========================================
-      # PART 1: EXTRACT UNIQUE IMAGES
+      # STEP 1: EXTRACT IMAGES
       # ==========================================
       - name: Step 1 - Image Extraction
         run: |
@@ -70,18 +70,18 @@ jobs:
                           try:
                               with open(filepath) as f:
                                   docs = yaml.safe_load_all(f)
-                                  found_image = False
+                                  found = False
 
                                   for doc in docs:
                                       if not doc:
                                           continue
                                       for img in extract_images(doc):
                                           if img and img.lower() != "none":
-                                              found_image = True
+                                              found = True
                                               mapping.append({"app": app, "env": env, "image": img})
                                               unique_images.add(img)
 
-                                  if not found_image:
+                                  if not found:
                                       logging.warning(f"No valid image found in {filepath}")
 
                           except Exception as e:
@@ -97,13 +97,13 @@ jobs:
           EOF
 
       # ==========================================
-      # PART 2: SCAN UNIQUE IMAGES (PARALLEL)
+      # STEP 2: SCAN IMAGES (FIXED CONCURRENCY)
       # ==========================================
       - name: Step 2 - Parallel Scanning
         run: |
           python << 'EOF'
           import json, subprocess, os, logging
-          from concurrent.futures import ThreadPoolExecutor
+          from concurrent.futures import ThreadPoolExecutor, as_completed
 
           logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 
@@ -118,7 +118,6 @@ jobs:
                   json.dump({}, f)
               exit(0)
 
-          # Download DB once
           subprocess.run(["trivy", "image", "--download-db-only", "--quiet"], check=True)
 
           max_workers = min(4, os.cpu_count() or 2)
@@ -133,26 +132,28 @@ jobs:
                   "--cache-dir", ".trivy_cache",
                   img
               ]
+
               try:
                   res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+                  if res.returncode != 0:
+                      logging.error(f"Trivy failed for {img}: {res.stderr}")
+                      return img, {"critical": 0, "high": 0}
 
                   if not res.stdout.strip():
                       return img, {"critical": 0, "high": 0}
 
                   data = json.loads(res.stdout)
 
-                  c_count = 0
-                  h_count = 0
-
+                  c, h = 0, 0
                   for r in data.get("Results", []):
                       for v in r.get("Vulnerabilities", []):
-                          sev = v.get("Severity")
-                          if sev == "CRITICAL":
-                              c_count += 1
-                          elif sev == "HIGH":
-                              h_count += 1
+                          if v.get("Severity") == "CRITICAL":
+                              c += 1
+                          elif v.get("Severity") == "HIGH":
+                              h += 1
 
-                  return img, {"critical": c_count, "high": h_count}
+                  return img, {"critical": c, "high": h}
 
               except subprocess.TimeoutExpired:
                   logging.error(f"[TIMEOUT] {img}")
@@ -162,8 +163,26 @@ jobs:
                   logging.error(f"Scan failed for {img}: {e}")
                   return img, {"critical": 0, "high": 0}
 
-          with ThreadPoolExecutor(max_workers=max_workers) as exe:
-              results = dict(exe.map(scan, unique_images))
+          results = {}
+
+          with ThreadPoolExecutor(max_workers=max_workers) as executor:
+              future_to_img = {executor.submit(scan, img): img for img in unique_images}
+
+              for future in as_completed(future_to_img):
+                  img = future_to_img[future]
+                  try:
+                      image, result = future.result()
+                      results[image] = result
+                  except Exception as e:
+                      logging.error(f"[FATAL] Future failed for {img}: {e}")
+                      results[img] = {"critical": 0, "high": 0}
+
+          # 🔍 VALIDATION
+          if len(results) != len(unique_images):
+              logging.warning(f"Mismatch: expected {len(unique_images)}, got {len(results)}")
+              missing = set(unique_images) - set(results.keys())
+              if missing:
+                  logging.error(f"Missing scans: {missing}")
 
           with open("results/scan_results.json", "w") as f:
               json.dump(results, f)
@@ -172,7 +191,7 @@ jobs:
           EOF
 
       # ==========================================
-      # PART 3: AGGREGATE & REPORT
+      # STEP 3: REPORT
       # ==========================================
       - name: Step 3 - Final Reporting
         run: |
@@ -188,7 +207,7 @@ jobs:
               with open("results/scan_results.json") as f:
                   scans = json.load(f)
           except Exception as e:
-              logging.error(f"No scan data found: {e}")
+              logging.error(f"No scan data: {e}")
               exit(0)
 
           report = defaultdict(lambda: defaultdict(lambda: {
@@ -198,7 +217,7 @@ jobs:
           }))
 
           for item in mapping:
-              app, env, img = item['app'], item['env'], item['image']
+              app, env, img = item["app"], item["env"], item["image"]
               res = scans.get(img, {"critical": 0, "high": 0})
 
               report[app][env]["critical"] += res["critical"]
@@ -210,9 +229,8 @@ jobs:
           with open("results/final_report.json", "w") as f:
               json.dump(report, f, indent=2)
 
-          logging.info("FINAL SECURITY REPORT")
+          logging.info("FINAL REPORT")
           print(json.dumps(report, indent=2))
-          logging.info("Report generated successfully.")
           EOF
 
       - name: Upload Artifact
