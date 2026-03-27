@@ -18,129 +18,124 @@ jobs:
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | \
           sudo sh -s -- -b /usr/local/bin v0.69.3
           pip install pyyaml
+          mkdir -p results .trivy_cache
 
-      - name: Run Python Security Suite
+      # ==========================================
+      # PART 1: EXTRACT UNIQUE IMAGES
+      # ==========================================
+      - name: Step 1 - Image Extraction
+        id: extraction
         run: |
           python << 'EOF'
-          import os
-          import yaml
-          import subprocess
-          import json
-          import hashlib
-          from concurrent.futures import ThreadPoolExecutor
-          from collections import defaultdict
-
-          # --- CONFIGURATION ---
-          BASE_DIR = "deployments"
-          RESULTS_DIR = "results"
-          os.makedirs(RESULTS_DIR, exist_ok=True)
-
-          def get_safe_hash(text):
-              return hashlib.md5(text.encode()).hexdigest()
+          import os, yaml, json
 
           def extract_images(data):
               images = []
               if isinstance(data, dict):
                   for k, v in data.items():
                       if k == "image":
-                          if isinstance(v, str): images.append(v)
+                          if isinstance(v, str): images.append(v.strip())
                           elif isinstance(v, dict):
                               repo, tag = v.get("repository", ""), v.get("tag", "")
-                              if repo and tag: images.append(f"{repo}:{tag}")
-                      else:
-                          images.extend(extract_images(v))
+                              if repo and tag: images.append(f"{repo.strip()}:{tag.strip()}")
+                      else: images.extend(extract_images(v))
               elif isinstance(data, list):
                   for item in data: images.extend(extract_images(item))
               return images
 
-          # 1. SCAN FILESYSTEM FOR IMAGES
-          mapping = [] # List of (app, env, image)
+          mapping = []
           unique_images = set()
 
-          for root, _, files in os.walk(BASE_DIR):
+          for root, _, files in os.walk("deployments"):
               for file in files:
                   if file.endswith((".yaml", ".yml")):
-                      rel_path = os.path.relpath(root, BASE_DIR).split(os.sep)
-                      if len(rel_path) < 2: continue
-                      
-                      app, env = rel_path[0], rel_path[1]
+                      rel = os.path.relpath(root, "deployments").split(os.sep)
+                      if len(rel) < 2: continue
+                      app, env = rel[0], rel[1]
                       try:
-                          with open(os.path.join(root, file), "r") as f:
-                              docs = yaml.safe_load_all(f)
-                              for doc in docs:
+                          with open(os.path.join(root, file)) as f:
+                              for doc in yaml.safe_load_all(f):
                                   if not doc: continue
                                   for img in extract_images(doc):
-                                      if img and img not in ["null", "null:null"]:
-                                          mapping.append((app, env, img))
-                                          unique_images.add(img)
-                      except Exception as e:
-                          print(f"Error reading {file}: {e}")
+                                      mapping.append({"app": app, "env": env, "image": img})
+                                      unique_images.add(img)
+                      except Exception as e: print(f"Error: {e}")
 
-          # 2. DOWNLOAD TRIVY DB ONCE
-          print("Downloading Trivy DB...")
+          with open("results/mapping.json", "w") as f: json.dump(mapping, f)
+          with open("results/unique_images.json", "w") as f: json.dump(list(unique_images), f)
+          print(f"Found {len(unique_images)} unique images across {len(mapping)} deployments.")
+          EOF
+
+      # ==========================================
+      # PART 2: SCAN UNIQUE IMAGES (NO DUPLICATES)
+      # ==========================================
+      - name: Step 2 - Parallel Scanning
+        run: |
+          python << 'EOF'
+          import json, subprocess, os
+          from concurrent.futures import ThreadPoolExecutor
+
+          with open("results/unique_images.json") as f:
+              unique_images = json.load(f)
+
+          # Download DB once before parallel threads start
           subprocess.run(["trivy", "image", "--download-db-only", "--quiet"], check=True)
 
-          # 3. PARALLEL SCAN FUNCTION
-          def scan_image(img):
-              img_hash = get_safe_hash(img)
-              raw_json = os.path.join(RESULTS_DIR, f"raw_{img_hash}.json")
-              
+          def scan(img):
               print(f"Scanning: {img}")
-              # Run Trivy command via subprocess
-              cmd = [
-                  "trivy", "image", "--format", "json", "--quiet",
-                  "--severity", "HIGH,CRITICAL", "--no-progress", img
-              ]
-              
+              cmd = ["trivy", "image", "--format", "json", "--quiet", "--severity", "HIGH,CRITICAL", img]
               try:
-                  result = subprocess.run(cmd, capture_output=True, text=True)
-                  data = json.loads(result.stdout)
-                  
-                  # Parse vulnerabilities using Python instead of JQ
-                  crit = 0
-                  high = 0
-                  for res in data.get("Results", []):
-                      for vuln in res.get("Vulnerabilities", []):
-                          sev = vuln.get("Severity")
-                          if sev == "CRITICAL": crit += 1
-                          elif sev == "HIGH": high += 1
-                  
-                  return img, {"critical": crit, "high": high}
-              except Exception as e:
-                  print(f"Failed to scan {img}: {e}")
-                  return img, {"critical": 0, "high": 0}
+                  res = subprocess.run(cmd, capture_output=True, text=True)
+                  data = json.loads(res.stdout)
+                  crit = sum(len(r.get("Vulnerabilities", [])) for r in data.get("Results", []) if r)
+                  # Filtering for HIGH/CRITICAL is already handled by Trivy flag,
+                  # but we double check severity in Python for accuracy:
+                  c_count = 0
+                  h_count = 0
+                  for r in data.get("Results", []):
+                      for v in r.get("Vulnerabilities", []):
+                          if v.get("Severity") == "CRITICAL": c_count += 1
+                          if v.get("Severity") == "HIGH": h_count += 1
+                  return img, {"critical": c_count, "high": h_count}
+              except: return img, {"critical": 0, "high": 0}
 
-          # Execute scans in parallel (2 workers to stay safe with rate limits)
-          print(f"Starting parallel scan for {len(unique_images)} images...")
-          with ThreadPoolExecutor(max_workers=2) as executor:
-              scan_results = dict(executor.map(scan_image, list(unique_images)))
+          with ThreadPoolExecutor(max_workers=2) as exe:
+              results = dict(exe.map(scan, unique_images))
 
-          # 4. AGGREGATE FINAL REPORT
-          final_report = defaultdict(lambda: defaultdict(lambda: {
-              "total_critical": 0,
-              "total_high": 0,
-              "images": []
-          }))
+          with open("results/scan_results.json", "w") as f:
+              json.dump(results, f)
+          EOF
 
-          for app, env, img in mapping:
-              stats = scan_results.get(img, {"critical": 0, "high": 0})
-              entry = final_report[app][env]
+      # ==========================================
+      # PART 3: AGGREGATE & REPORT
+      # ==========================================
+      - name: Step 3 - Final Reporting
+        run: |
+          python << 'EOF'
+          import json
+          from collections import defaultdict
 
-              entry["total_critical"] += stats["critical"]
-              entry["total_high"] += stats["high"]
-              if img not in entry["images"]:
-                  entry["images"].append(img)
+          with open("results/mapping.json") as f: mapping = json.load(f)
+          with open("results/scan_results.json") as f: scans = json.load(f)
 
-          # 5. SAVE OUTPUT
-          with open(os.path.join(RESULTS_DIR, "final_report.json"), "w") as f:
-              json.dump(final_report, f, indent=2)
+          report = defaultdict(lambda: defaultdict(lambda: {"critical": 0, "high": 0, "images": []}))
 
-          print("\n--- SCAN COMPLETE ---")
-          print(json.dumps(final_report, indent=2))
+          for item in mapping:
+              app, env, img = item['app'], item['env'], item['image']
+              res = scans.get(img, {"critical": 0, "high": 0})
+
+              report[app][env]["critical"] += res["critical"]
+              report[app][env]["high"] += res["high"]
+              if img not in report[app][env]["images"]:
+                  report[app][env]["images"].append(img)
+
+          with open("results/final_report.json", "w") as f:
+              json.dump(report, f, indent=2)
+          print(json.dumps(report, indent=2))
           EOF
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: trivy-security-report
+          name: trivy-full-report
           path: results/final_report.json
