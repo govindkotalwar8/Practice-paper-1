@@ -33,53 +33,41 @@ jobs:
               if isinstance(data, dict):
                   for k, v in data.items():
                       if k == "image":
-                          # Fix: Force string conversion for floats/ints
                           if isinstance(v, (str, int, float)):
                               images.append(str(v).strip())
                           elif isinstance(v, dict):
                               repo = str(v.get("repository", "")).strip()
                               tag = str(v.get("tag", "")).strip()
-                              if repo and tag:
-                                  images.append(f"{repo}:{tag}")
+                              if repo and tag: images.append(f"{repo}:{tag}")
                       else:
                           images.extend(extract_images(v))
               elif isinstance(data, list):
-                  for item in data:
-                      images.extend(extract_images(item))
+                  for item in data: images.extend(extract_images(item))
               return images
 
           mapping = []
           unique_images = set()
 
-          if not os.path.exists("deployments"):
-              print("[INFO] No 'deployments' directory found.")
-          else:
+          if os.path.exists("deployments"):
               for root, _, files in os.walk("deployments"):
                   for file in files:
                       if file.endswith((".yaml", ".yml")):
                           rel = os.path.relpath(root, "deployments").split(os.sep)
-                          if len(rel) < 2:
-                              continue
-
+                          if len(rel) < 2: continue
                           app, env = rel[0], rel[1]
                           try:
                               with open(os.path.join(root, file)) as f:
-                                  docs = yaml.safe_load_all(f)
-                                  for doc in docs:
+                                  for doc in yaml.safe_load_all(f):
                                       if not doc: continue
                                       for img in extract_images(doc):
                                           if img and img.lower() != "none":
                                               mapping.append({"app": app, "env": env, "image": img})
                                               unique_images.add(img)
-                          except Exception as e:
-                              print(f"[ERROR] Parsing {file}: {e}")
+                          except Exception as e: print(f"[ERROR] {file}: {e}")
 
-          with open("results/mapping.json", "w") as f:
-              json.dump(mapping, f)
-          with open("results/unique_images.json", "w") as f:
-              json.dump(list(unique_images), f)
-          
-          print(f"[INFO] Found {len(unique_images)} unique images across {len(mapping)} deployments.")
+          with open("results/mapping.json", "w") as f: json.dump(mapping, f)
+          with open("results/unique_images.json", "w") as f: json.dump(list(unique_images), f)
+          print(f"[INFO] Found {len(unique_images)} unique images.")
           EOF
 
       # ==========================================
@@ -91,9 +79,6 @@ jobs:
           import json, subprocess, os
           from concurrent.futures import ThreadPoolExecutor
 
-          if not os.path.exists("results/unique_images.json"):
-              exit(0)
-
           with open("results/unique_images.json") as f:
               unique_images = json.load(f)
 
@@ -101,41 +86,35 @@ jobs:
               with open("results/scan_results.json", "w") as f: json.dump({}, f)
               exit(0)
 
-          # Download DB once before threading
           subprocess.run(["trivy", "image", "--download-db-only", "--quiet"], check=True)
 
           def scan(img):
               print(f"[INFO] Scanning: {img}")
-              cmd = [
-                  "trivy", "image", "--format", "json", "--quiet",
-                  "--severity", "HIGH,CRITICAL", "--cache-dir", ".trivy_cache", img
-              ]
+              cmd = ["trivy", "image", "--format", "json", "--quiet", "--severity", "HIGH,CRITICAL", "--cache-dir", ".trivy_cache", img]
               try:
                   res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-                  if not res.stdout.strip():
+                  if res.returncode != 0:
+                      print(f"[ERROR] Trivy failed for {img}")
                       return img, {"critical": 0, "high": 0}
-
+                  
                   data = json.loads(res.stdout)
-                  c_count = 0
-                  h_count = 0
+                  c, h = 0, 0
                   for r in data.get("Results", []):
                       for v in r.get("Vulnerabilities", []):
                           sev = v.get("Severity")
-                          if sev == "CRITICAL": c_count += 1
-                          elif sev == "HIGH": h_count += 1
-                  return img, {"critical": c_count, "high": h_count}
-              except:
-                  return img, {"critical": 0, "high": 0}
+                          if sev == "CRITICAL": c += 1
+                          elif sev == "HIGH": h += 1
+                  return img, {"critical": c, "high": h}
+              except: return img, {"critical": 0, "high": 0}
 
           with ThreadPoolExecutor(max_workers=2) as exe:
               results = dict(exe.map(scan, unique_images))
 
-          with open("results/scan_results.json", "w") as f:
-              json.dump(results, f)
+          with open("results/scan_results.json", "w") as f: json.dump(results, f)
           EOF
 
       # ==========================================
-      # PART 3: AGGREGATE & REPORT (ALWAYS PASSES)
+      # PART 3: AGGREGATE & REPORT (ALWAYS PASS)
       # ==========================================
       - name: Step 3 - Final Reporting
         run: |
@@ -143,30 +122,19 @@ jobs:
           import json
           from collections import defaultdict
 
-          try:
-              with open("results/mapping.json") as f: mapping = json.load(f)
-              with open("results/scan_results.json") as f: scans = json.load(f)
-          except:
-              print("[INFO] No scan data found.")
-              exit(0)
+          with open("results/mapping.json") as f: mapping = json.load(f)
+          with open("results/scan_results.json") as f: scans = json.load(f)
 
           report = defaultdict(lambda: defaultdict(lambda: {"critical": 0, "high": 0, "images": []}))
-
           for item in mapping:
               app, env, img = item['app'], item['env'], item['image']
               res = scans.get(img, {"critical": 0, "high": 0})
-              
               report[app][env]["critical"] += res["critical"]
               report[app][env]["high"] += res["high"]
-              if img not in report[app][env]["images"]:
-                  report[app][env]["images"].append(img)
+              if img not in report[app][env]["images"]: report[app][env]["images"].append(img)
 
-          with open("results/final_report.json", "w") as f:
-              json.dump(report, f, indent=2)
-
-          print("--- FINAL SECURITY REPORT ---")
+          with open("results/final_report.json", "w") as f: json.dump(report, f, indent=2)
           print(json.dumps(report, indent=2))
-          print("\n[SUCCESS] Report generated. Pipeline continuing as requested.")
           EOF
 
       - name: Upload Artifact
