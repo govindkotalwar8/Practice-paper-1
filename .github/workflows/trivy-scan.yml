@@ -15,31 +15,22 @@ jobs:
 
       - name: Install Tools
         run: |
-          # Install Trivy
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
-
-          # Install jq
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | \
+          sudo sh -s -- -b /usr/local/bin v0.69.3
           sudo apt-get update && sudo apt-get install -y jq
-
-          # Install yq (IMPORTANT)
           sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           sudo chmod +x /usr/local/bin/yq
 
-      - name: Strict Image Extraction
+      - name: Image Extraction
         run: |
           mkdir -p results
           > results/mapping.txt
 
           find deployments -type f \( -name "*.yaml" -o -name "*.yml" \) | while read -r file; do
 
-            # Extract app and env safely
-            rel_path="${file#deployments/}"
-            IFS='/' read -ra parts <<< "$rel_path"
+            app=$(echo "$file" | cut -d'/' -f2)
+            env=$(echo "$file" | cut -d'/' -f3)
 
-            app="${parts[0]}"
-            env="${parts[1]}"
-
-            # Extract images
             yq eval '.. | select(has("image")) | .image | (select(tag == "!!str") // (.repository + ":" + .tag))' "$file" | while read -r img; do
 
               img=$(echo "$img" | tr -d '"' | tr -d "'")
@@ -50,7 +41,6 @@ jobs:
             done
           done
 
-          # Remove duplicates early
           sort -u results/mapping.txt -o results/mapping.txt
 
       - name: Create Scan Script
@@ -112,7 +102,6 @@ jobs:
 
       - name: 5. Display Report
         run: |
-          echo "==== Final Scan Summary ===="
           cat results/final_report.json
 
       - name: Upload Artifact
