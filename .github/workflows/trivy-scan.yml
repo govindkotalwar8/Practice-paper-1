@@ -26,7 +26,9 @@ jobs:
       - name: Step 1 - Image Extraction
         run: |
           python << 'EOF'
-          import os, yaml, json
+          import os, yaml, json, logging
+
+          logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 
           def extract_images(data):
               images = []
@@ -38,36 +40,60 @@ jobs:
                           elif isinstance(v, dict):
                               repo = str(v.get("repository", "")).strip()
                               tag = str(v.get("tag", "")).strip()
-                              if repo and tag: images.append(f"{repo}:{tag}")
+                              if repo and tag:
+                                  images.append(f"{repo}:{tag}")
                       else:
                           images.extend(extract_images(v))
               elif isinstance(data, list):
-                  for item in data: images.extend(extract_images(item))
+                  for item in data:
+                      images.extend(extract_images(item))
               return images
 
           mapping = []
           unique_images = set()
 
-          if os.path.exists("deployments"):
+          if not os.path.exists("deployments"):
+              logging.info("No 'deployments' directory found.")
+          else:
               for root, _, files in os.walk("deployments"):
                   for file in files:
                       if file.endswith((".yaml", ".yml")):
                           rel = os.path.relpath(root, "deployments").split(os.sep)
-                          if len(rel) < 2: continue
-                          app, env = rel[0], rel[1]
+
+                          if len(rel) >= 2:
+                              app, env = rel[0], rel[1]
+                          else:
+                              app, env = "unknown", "unknown"
+
+                          filepath = os.path.join(root, file)
+
                           try:
-                              with open(os.path.join(root, file)) as f:
-                                  for doc in yaml.safe_load_all(f):
-                                      if not doc: continue
+                              with open(filepath) as f:
+                                  docs = yaml.safe_load_all(f)
+                                  found_image = False
+
+                                  for doc in docs:
+                                      if not doc:
+                                          continue
                                       for img in extract_images(doc):
                                           if img and img.lower() != "none":
+                                              found_image = True
                                               mapping.append({"app": app, "env": env, "image": img})
                                               unique_images.add(img)
-                          except Exception as e: print(f"[ERROR] {file}: {e}")
 
-          with open("results/mapping.json", "w") as f: json.dump(mapping, f)
-          with open("results/unique_images.json", "w") as f: json.dump(list(unique_images), f)
-          print(f"[INFO] Found {len(unique_images)} unique images.")
+                                  if not found_image:
+                                      logging.warning(f"No valid image found in {filepath}")
+
+                          except Exception as e:
+                              logging.error(f"Parsing failed for {filepath}: {e}")
+
+          with open("results/mapping.json", "w") as f:
+              json.dump(mapping, f)
+
+          with open("results/unique_images.json", "w") as f:
+              json.dump(list(unique_images), f)
+
+          logging.info(f"Found {len(unique_images)} unique images across {len(mapping)} deployments.")
           EOF
 
       # ==========================================
@@ -76,65 +102,117 @@ jobs:
       - name: Step 2 - Parallel Scanning
         run: |
           python << 'EOF'
-          import json, subprocess, os
+          import json, subprocess, os, logging
           from concurrent.futures import ThreadPoolExecutor
+
+          logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+
+          if not os.path.exists("results/unique_images.json"):
+              exit(0)
 
           with open("results/unique_images.json") as f:
               unique_images = json.load(f)
 
           if not unique_images:
-              with open("results/scan_results.json", "w") as f: json.dump({}, f)
+              with open("results/scan_results.json", "w") as f:
+                  json.dump({}, f)
               exit(0)
 
+          # Download DB once
           subprocess.run(["trivy", "image", "--download-db-only", "--quiet"], check=True)
 
+          max_workers = min(4, os.cpu_count() or 2)
+
           def scan(img):
-              print(f"[INFO] Scanning: {img}")
-              cmd = ["trivy", "image", "--format", "json", "--quiet", "--severity", "HIGH,CRITICAL", "--cache-dir", ".trivy_cache", img]
+              logging.info(f"Scanning: {img}")
+              cmd = [
+                  "trivy", "image",
+                  "--format", "json",
+                  "--quiet",
+                  "--severity", "HIGH,CRITICAL",
+                  "--cache-dir", ".trivy_cache",
+                  img
+              ]
               try:
                   res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-                  if res.returncode != 0:
-                      print(f"[ERROR] Trivy failed for {img}")
+
+                  if not res.stdout.strip():
                       return img, {"critical": 0, "high": 0}
-                  
+
                   data = json.loads(res.stdout)
-                  c, h = 0, 0
+
+                  c_count = 0
+                  h_count = 0
+
                   for r in data.get("Results", []):
                       for v in r.get("Vulnerabilities", []):
                           sev = v.get("Severity")
-                          if sev == "CRITICAL": c += 1
-                          elif sev == "HIGH": h += 1
-                  return img, {"critical": c, "high": h}
-              except: return img, {"critical": 0, "high": 0}
+                          if sev == "CRITICAL":
+                              c_count += 1
+                          elif sev == "HIGH":
+                              h_count += 1
 
-          with ThreadPoolExecutor(max_workers=2) as exe:
+                  return img, {"critical": c_count, "high": h_count}
+
+              except subprocess.TimeoutExpired:
+                  logging.error(f"[TIMEOUT] {img}")
+                  return img, {"critical": 0, "high": 0}
+
+              except Exception as e:
+                  logging.error(f"Scan failed for {img}: {e}")
+                  return img, {"critical": 0, "high": 0}
+
+          with ThreadPoolExecutor(max_workers=max_workers) as exe:
               results = dict(exe.map(scan, unique_images))
 
-          with open("results/scan_results.json", "w") as f: json.dump(results, f)
+          with open("results/scan_results.json", "w") as f:
+              json.dump(results, f)
+
+          logging.info("Scanning completed.")
           EOF
 
       # ==========================================
-      # PART 3: AGGREGATE & REPORT (ALWAYS PASS)
+      # PART 3: AGGREGATE & REPORT
       # ==========================================
       - name: Step 3 - Final Reporting
         run: |
           python << 'EOF'
-          import json
+          import json, logging
           from collections import defaultdict
 
-          with open("results/mapping.json") as f: mapping = json.load(f)
-          with open("results/scan_results.json") as f: scans = json.load(f)
+          logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 
-          report = defaultdict(lambda: defaultdict(lambda: {"critical": 0, "high": 0, "images": []}))
+          try:
+              with open("results/mapping.json") as f:
+                  mapping = json.load(f)
+              with open("results/scan_results.json") as f:
+                  scans = json.load(f)
+          except Exception as e:
+              logging.error(f"No scan data found: {e}")
+              exit(0)
+
+          report = defaultdict(lambda: defaultdict(lambda: {
+              "critical": 0,
+              "high": 0,
+              "images": []
+          }))
+
           for item in mapping:
               app, env, img = item['app'], item['env'], item['image']
               res = scans.get(img, {"critical": 0, "high": 0})
+
               report[app][env]["critical"] += res["critical"]
               report[app][env]["high"] += res["high"]
-              if img not in report[app][env]["images"]: report[app][env]["images"].append(img)
 
-          with open("results/final_report.json", "w") as f: json.dump(report, f, indent=2)
+              if img not in report[app][env]["images"]:
+                  report[app][env]["images"].append(img)
+
+          with open("results/final_report.json", "w") as f:
+              json.dump(report, f, indent=2)
+
+          logging.info("FINAL SECURITY REPORT")
           print(json.dumps(report, indent=2))
+          logging.info("Report generated successfully.")
           EOF
 
       - name: Upload Artifact
