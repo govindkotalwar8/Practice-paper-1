@@ -79,16 +79,24 @@ def get_images():
 def scan_image(image):
     cmd = [
         "trivy", "image",
-        "--quiet",
         "--format", "json",
         "--severity", "HIGH,CRITICAL",
         image
     ]
 
     try:
+        print(f"[DEBUG] Scanning: {image}")
+
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
-        if res.returncode != 0 or not res.stdout.strip():
+        # ❗ Show real error if scan fails
+        if res.returncode != 0:
+            print(f"[ERROR] Scan failed for {image}")
+            print(res.stderr.strip())
+            return image, {"critical": -1, "high": -1}
+
+        if not res.stdout.strip():
+            print(f"[WARNING] Empty result for {image}")
             return image, {"critical": 0, "high": 0}
 
         data = json.loads(res.stdout)
@@ -103,8 +111,13 @@ def scan_image(image):
 
         return image, {"critical": critical, "high": high}
 
-    except Exception:
-        return image, {"critical": 0, "high": 0}
+    except subprocess.TimeoutExpired:
+        print(f"[ERROR] Timeout while scanning {image}")
+        return image, {"critical": -1, "high": -1}
+
+    except Exception as e:
+        print(f"[ERROR] Exception for {image}: {e}")
+        return image, {"critical": -1, "high": -1}
 
 
 def scan_images(images):
@@ -130,6 +143,10 @@ def generate_report(mapping, scan_results):
     for item in mapping:
         app, env, img = item["app"], item["env"], item["image"]
         res = scan_results.get(img, {"critical": 0, "high": 0})
+
+        # Skip failed scans in aggregation
+        if res["critical"] == -1:
+            continue
 
         report[app][env]["critical"] += res["critical"]
         report[app][env]["high"] += res["high"]
@@ -162,9 +179,21 @@ def main():
     print("\n[INFO] Scanning images...")
     scans = scan_images(images)
 
+    # ---- Show Results ----
     print("\n[INFO] Scan Results:")
     for img, res in scans.items():
-        print(f"  - {img} | CRITICAL: {res['critical']} | HIGH: {res['high']}")
+        if res["critical"] == -1:
+            print(f"  - {img} | ❌ SCAN FAILED")
+        else:
+            print(f"  - {img} | CRITICAL: {res['critical']} | HIGH: {res['high']}")
+
+    # ---- Show Failed ----
+    failed = [img for img, res in scans.items() if res["critical"] == -1]
+
+    if failed:
+        print("\n[WARNING] Failed Scans:")
+        for f in failed:
+            print(f"  - {f}")
 
     # ---- Report ----
     print("\n[INFO] Generating report...")
