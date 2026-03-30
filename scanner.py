@@ -2,6 +2,8 @@ import os
 import json
 import yaml
 import subprocess
+import tempfile
+import shutil
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
@@ -77,10 +79,15 @@ def get_images():
 # STEP 2: SCAN IMAGES
 # =========================
 def scan_image(image):
+    cache_dir = tempfile.mkdtemp()
+
     cmd = [
         "trivy", "image",
         "--format", "json",
         "--severity", "HIGH,CRITICAL",
+        "--scanners", "vuln",           # faster + avoids secret scan issues
+        "--cache-dir", cache_dir,       # isolate cache
+        "--skip-db-update",             # prevent multiple DB downloads
         image
     ]
 
@@ -89,7 +96,6 @@ def scan_image(image):
 
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
-        # ❗ Show real error if scan fails
         if res.returncode != 0:
             print(f"[ERROR] Scan failed for {image}")
             print(res.stderr.strip())
@@ -119,11 +125,15 @@ def scan_image(image):
         print(f"[ERROR] Exception for {image}: {e}")
         return image, {"critical": -1, "high": -1}
 
+    finally:
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
 
 def scan_images(images):
     results = {}
 
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    # Slightly safer concurrency for CI
+    with ThreadPoolExecutor(max_workers=3) as executor:
         for image, result in executor.map(scan_image, images):
             results[image] = result
 
@@ -144,7 +154,7 @@ def generate_report(mapping, scan_results):
         app, env, img = item["app"], item["env"], item["image"]
         res = scan_results.get(img, {"critical": 0, "high": 0})
 
-        # Skip failed scans in aggregation
+        # skip failed scans
         if res["critical"] == -1:
             continue
 
@@ -175,11 +185,18 @@ def main():
     for img in images:
         print(f"  - {img}")
 
+    # ---- Download DB once ----
+    print("\n[INFO] Downloading Trivy DB once...")
+    subprocess.run(
+        ["trivy", "image", "--download-db-only"],
+        check=True
+    )
+
     # ---- Scan ----
     print("\n[INFO] Scanning images...")
     scans = scan_images(images)
 
-    # ---- Show Results ----
+    # ---- Results ----
     print("\n[INFO] Scan Results:")
     for img, res in scans.items():
         if res["critical"] == -1:
@@ -187,7 +204,7 @@ def main():
         else:
             print(f"  - {img} | CRITICAL: {res['critical']} | HIGH: {res['high']}")
 
-    # ---- Show Failed ----
+    # ---- Failed ----
     failed = [img for img, res in scans.items() if res["critical"] == -1]
 
     if failed:
