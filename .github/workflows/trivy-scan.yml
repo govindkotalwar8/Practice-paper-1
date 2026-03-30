@@ -2,7 +2,7 @@ name: Trivy Scan
 
 on:
   push:
-    branches: [ main ]
+    branches: [ trivy_scan ]
   pull_request:
 
 jobs:
@@ -10,26 +10,38 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Install Trivy
         run: |
+          TRIVY_VERSION="v0.69.3"
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | \
           sudo sh -s -- -b /usr/local/bin
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: 3.11
+          python-version: 3.13
 
-      - name: Install deps
+      - name: Install dependencies
         run: pip install pyyaml
 
-      - name: Run Scanner
-        run: python scanner.py
+      - name: Extract Images (Python)
+        run: |
+          python scanner.py --extract-only
+
+      - name: Run Trivy Scan (Bash)
+        run: |
+          chmod +x scan.sh
+          bash scan.sh
+
+      - name: Generate Final Report (Python)
+        run: |
+          python scanner.py --report-only
 
       - name: Upload report
         uses: actions/upload-artifact@v4
         with:
-          name: report
+          name: trivy-report
           path: results/final_report.json

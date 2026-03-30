@@ -1,19 +1,16 @@
 import os
+import sys
 import json
 import yaml
-import subprocess
-import tempfile
-import shutil
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 
 RESULTS_DIR = "results"
 DEPLOYMENTS_DIR = "deployments"
 
 
-# =========================
-# STEP 1: EXTRACT IMAGES
-# =========================
+# -----------------------------
+# Extract images recursively
+# -----------------------------
 def extract_images(data):
     images = []
 
@@ -37,6 +34,9 @@ def extract_images(data):
     return images
 
 
+# -----------------------------
+# Read deployment YAMLs
+# -----------------------------
 def get_images():
     mapping = []
     unique_images = set()
@@ -75,73 +75,35 @@ def get_images():
     return mapping, list(unique_images)
 
 
-# =========================
-# STEP 2: SCAN IMAGES
-# =========================
-def scan_image(image):
-    cache_dir = tempfile.mkdtemp()
+# -----------------------------
+# Save images for bash scan
+# -----------------------------
+def save_images_for_scan(images):
+    path = f"{RESULTS_DIR}/images.txt"
+    with open(path, "w") as f:
+        for img in images:
+            f.write(img + "\n")
 
-    cmd = [
-        "trivy", "image",
-        "--format", "json",
-        "--severity", "HIGH,CRITICAL",
-        "--scanners", "vuln",     # faster + avoids secret scanning
-        "--cache-dir", cache_dir, # isolate cache to avoid lock issues
-        image
-    ]
-
-    try:
-        print(f"[DEBUG] Scanning: {image}")
-
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-
-        if res.returncode != 0:
-            print(f"[ERROR] Scan failed for {image}")
-            print(res.stderr.strip())
-            return image, {"critical": -1, "high": -1}
-
-        if not res.stdout.strip():
-            print(f"[WARNING] Empty result for {image}")
-            return image, {"critical": 0, "high": 0}
-
-        data = json.loads(res.stdout)
-
-        critical, high = 0, 0
-        for r in data.get("Results", []):
-            for v in r.get("Vulnerabilities", []):
-                if v.get("Severity") == "CRITICAL":
-                    critical += 1
-                elif v.get("Severity") == "HIGH":
-                    high += 1
-
-        return image, {"critical": critical, "high": high}
-
-    except subprocess.TimeoutExpired:
-        print(f"[ERROR] Timeout while scanning {image}")
-        return image, {"critical": -1, "high": -1}
-
-    except Exception as e:
-        print(f"[ERROR] Exception for {image}: {e}")
-        return image, {"critical": -1, "high": -1}
-
-    finally:
-        shutil.rmtree(cache_dir, ignore_errors=True)
+    print(f"[INFO] Images saved to {path}")
 
 
-def scan_images(images):
-    results = {}
+# -----------------------------
+# Load scan results from bash
+# -----------------------------
+def load_scan_results():
+    path = f"{RESULTS_DIR}/scan_results.json"
 
-    # safer concurrency for CI
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        for image, result in executor.map(scan_image, images):
-            results[image] = result
+    if not os.path.exists(path):
+        print("[ERROR] scan_results.json not found")
+        return {}
 
-    return results
+    with open(path) as f:
+        return json.load(f)
 
 
-# =========================
-# STEP 3: REPORT
-# =========================
+# -----------------------------
+# Generate final report
+# -----------------------------
 def generate_report(mapping, scan_results):
     report = defaultdict(lambda: defaultdict(lambda: {
         "critical": 0,
@@ -150,10 +112,12 @@ def generate_report(mapping, scan_results):
     }))
 
     for item in mapping:
-        app, env, img = item["app"], item["env"], item["image"]
+        app = item["app"]
+        env = item["env"]
+        img = item["image"]
+
         res = scan_results.get(img, {"critical": 0, "high": 0})
 
-        # skip failed scans
         if res["critical"] == -1:
             continue
 
@@ -166,55 +130,69 @@ def generate_report(mapping, scan_results):
     return report
 
 
-# =========================
-# MAIN
-# =========================
+# -----------------------------
+# Main entry
+# -----------------------------
 def main():
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
-    # ---- Extract ----
-    print("[INFO] Extracting images...")
-    mapping, images = get_images()
+    if len(sys.argv) < 2:
+        print("[ERROR] Mode required: --extract-only OR --report-only")
+        sys.exit(1)
 
-    if not images:
-        print("[INFO] No images found")
-        return
+    mode = sys.argv[1]
 
-    print(f"[INFO] Found {len(images)} images:\n")
-    for img in images:
-        print(f"  - {img}")
+    # -------------------------
+    # Step 1: Extract Images
+    # -------------------------
+    if mode == "--extract-only":
+        print("[INFO] Extracting images...")
 
-    # ---- Scan ----
-    print("\n[INFO] Scanning images...")
-    scans = scan_images(images)
+        mapping, images = get_images()
 
-    # ---- Results ----
-    print("\n[INFO] Scan Results:")
-    for img, res in scans.items():
-        if res["critical"] == -1:
-            print(f"  - {img} | ❌ SCAN FAILED")
-        else:
-            print(f"  - {img} | CRITICAL: {res['critical']} | HIGH: {res['high']}")
+        if not images:
+            print("[INFO] No images found")
+            return
 
-    # ---- Failed ----
-    failed = [img for img, res in scans.items() if res["critical"] == -1]
+        print(f"[INFO] Found {len(images)} images")
 
-    if failed:
-        print("\n[WARNING] Failed Scans:")
-        for f in failed:
-            print(f"  - {f}")
+        save_images_for_scan(images)
 
-    # ---- Report ----
-    print("\n[INFO] Generating report...")
-    report = generate_report(mapping, scans)
+        # Save mapping for later
+        with open(f"{RESULTS_DIR}/mapping.json", "w") as f:
+            json.dump(mapping, f, indent=2)
 
-    with open(f"{RESULTS_DIR}/final_report.json", "w") as f:
-        json.dump(report, f, indent=2)
+        print("[INFO] Mapping saved")
 
-    print("\n[INFO] Final Report:\n")
-    print(json.dumps(report, indent=2))
+    # -------------------------
+    # Step 2: Generate Report
+    # -------------------------
+    elif mode == "--report-only":
+        print("[INFO] Loading mapping and scan results...")
 
-    print("\n[INFO] Done!")
+        mapping_path = f"{RESULTS_DIR}/mapping.json"
+
+        if not os.path.exists(mapping_path):
+            print("[ERROR] mapping.json not found")
+            sys.exit(1)
+
+        with open(mapping_path) as f:
+            mapping = json.load(f)
+
+        scans = load_scan_results()
+
+        print("[INFO] Generating report...")
+        report = generate_report(mapping, scans)
+
+        output_path = f"{RESULTS_DIR}/final_report.json"
+        with open(output_path, "w") as f:
+            json.dump(report, f, indent=2)
+
+        print(f"[INFO] Report generated: {output_path}")
+
+    else:
+        print("[ERROR] Invalid mode")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
