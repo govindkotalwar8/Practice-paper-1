@@ -25,14 +25,12 @@ class TrivyReportProcessor:
 
     def count(self, data):
         c = h = 0
-
         for r in data.get("Results", []):
             for v in r.get("Vulnerabilities", []) or []:
                 if v["Severity"] == "CRITICAL":
                     c += 1
                 elif v["Severity"] == "HIGH":
                     h += 1
-
         return c, h
 
     def process(self):

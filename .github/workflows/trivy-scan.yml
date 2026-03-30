@@ -9,10 +9,6 @@ jobs:
   scan:
     runs-on: ubuntu-latest
 
-    env:
-      TRIVY_VERSION: v0.69.3
-      PYTHON_VERSION: "3.13"
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -28,29 +24,26 @@ jobs:
       - name: Install Trivy
         run: |
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | \
-          sudo sh -s -- -b /usr/local/bin $TRIVY_VERSION
+          sudo sh -s -- -b /usr/local/bin
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: 3.13
 
       - name: Install dependencies
-        run: |
-          pip install --no-cache-dir pyyaml
+        run: pip install pyyaml
 
       - name: Extract Images
-        run: |
-          python pre_process.py
+        run: python pre_process.py
 
       - name: Run Trivy Scan
         run: |
           chmod +x execute_trivy.sh
           ./execute_trivy.sh
 
-      - name: Generate Final Report
-        run: |
-          python post_process.py
+      - name: Generate Report
+        run: python post_process.py
 
       - name: Upload report
         if: always()
@@ -58,9 +51,3 @@ jobs:
         with:
           name: trivy-report
           path: results/final_report.json
-
-      - name: Print Summary
-        if: always()
-        run: |
-          echo "==== FINAL REPORT ===="
-          cat results/final_report.json || echo "No report generated"

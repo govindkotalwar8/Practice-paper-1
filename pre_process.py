@@ -70,7 +70,6 @@ class ImageExtractor:
                 except Exception as e:
                     logger.error(f"Failed parsing {path}: {e}")
 
-        # Save
         with open(f"{self.results_dir}/images.txt", "w") as f:
             for img in sorted(self.images):
                 f.write(img + "\n")

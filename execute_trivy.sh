@@ -25,8 +25,6 @@ scan_image() {
       --scanners vuln \
       --severity HIGH,CRITICAL \
       --cache-dir "$CACHE_DIR" \
-      --skip-db-update \
-      --skip-java-db-update \
       -o "$outfile" \
       "$image"; then
       return
@@ -37,7 +35,6 @@ scan_image() {
   done
 
   echo "[ERROR] Final failure: $image"
-
   echo '{"error": true}' > "$outfile"
 }
 
