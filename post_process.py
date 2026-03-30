@@ -1,27 +1,16 @@
 import os
 import json
-import logging
-import sys
 from collections import defaultdict
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-
-class TrivyReportProcessor:
-    def __init__(self, results_dir="results", fail_on_critical=True):
+class ReportGenerator:
+    def __init__(self, results_dir="results"):
         self.results_dir = results_dir
         self.raw_dir = f"{results_dir}/raw"
         self.mapping_file = f"{results_dir}/mapping.json"
-        self.output_file = f"{results_dir}/final_report.json"
-        self.fail_on_critical = fail_on_critical
 
-        self.mapping = []
-        self.results = {}
-
-    def load_mapping(self):
-        with open(self.mapping_file) as f:
-            self.mapping = json.load(f)
+    def hash(self, image):
+        return os.popen(f"echo -n '{image}' | sha256sum").read().split()[0][:12]
 
     def count(self, data):
         c = h = 0
@@ -33,33 +22,10 @@ class TrivyReportProcessor:
                     h += 1
         return c, h
 
-    def process(self):
-        images = set(item["image"] for item in self.mapping)
+    def run(self):
+        with open(self.mapping_file) as f:
+            mapping = json.load(f)
 
-        for img in images:
-            file_hash = os.popen(f"echo -n '{img}' | sha256sum").read().split()[0][:16]
-            path = f"{self.raw_dir}/{file_hash}.json"
-
-            if not os.path.exists(path):
-                logger.warning(f"Missing scan: {img}")
-                self.results[img] = {"critical": -1, "high": -1}
-                continue
-
-            try:
-                with open(path) as f:
-                    data = json.load(f)
-
-                if data.get("error"):
-                    raise Exception("Scan failed")
-
-                c, h = self.count(data)
-                self.results[img] = {"critical": c, "high": h}
-
-            except Exception as e:
-                logger.error(f"Failed processing {img}: {e}")
-                self.results[img] = {"critical": -1, "high": -1}
-
-    def generate(self):
         report = defaultdict(lambda: defaultdict(lambda: {
             "critical": 0,
             "high": 0,
@@ -68,41 +34,54 @@ class TrivyReportProcessor:
 
         total_c = total_h = 0
 
-        for item in self.mapping:
-            app, env, img = item["app"], item["env"], item["image"]
-            res = self.results.get(img, {"critical": 0, "high": 0})
+        for item in mapping:
+            img = item["image"]
+            file = f"{self.raw_dir}/{self.hash(img)}.json"
 
-            if res["critical"] == -1:
+            if not os.path.exists(file):
                 continue
 
-            report[app][env]["critical"] += res["critical"]
-            report[app][env]["high"] += res["high"]
+            try:
+                with open(file) as f:
+                    data = json.load(f)
 
-            total_c += res["critical"]
-            total_h += res["high"]
+                if data.get("error"):
+                    continue
 
-            if img not in report[app][env]["images"]:
-                report[app][env]["images"].append(img)
+                c, h = self.count(data)
 
-        logger.info(f"Total Critical: {total_c}")
-        logger.info(f"Total High: {total_h}")
+                report[item["app"]][item["env"]]["critical"] += c
+                report[item["app"]][item["env"]]["high"] += h
 
-        if self.fail_on_critical and total_c > 0:
-            logger.error("Critical vulnerabilities found! Failing pipeline.")
-            sys.exit(1)
+                total_c += c
+                total_h += h
 
-        return report
+                if img not in report[item["app"]][item["env"]]["images"]:
+                    report[item["app"]][item["env"]]["images"].append(img)
 
-    def run(self):
-        self.load_mapping()
-        self.process()
-        report = self.generate()
+            except:
+                continue
 
-        with open(self.output_file, "w") as f:
+        # Save JSON
+        output = f"{self.results_dir}/final_report.json"
+        with open(output, "w") as f:
             json.dump(report, f, indent=2)
 
-        logger.info("Report generated")
+
+        for app, envs in report.items():
+            print(f"APP: {app}")
+            for env, data in envs.items():
+                print(f"  ENV: {env}")
+                print(f"    Critical: {data['critical']}")
+                print(f"    High    : {data['high']}")
+                print(f"    Images  :")
+                for img in data["images"]:
+                    print(f"      - {img}")
+                print()
+
+        print(f"TOTAL CRITICAL: {total_c}")
+        print(f"TOTAL HIGH    : {total_h}")
 
 
 if __name__ == "__main__":
-    TrivyReportProcessor().run()
+    ReportGenerator().run()

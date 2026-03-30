@@ -1,43 +1,39 @@
 import os
 import json
 import yaml
-import logging
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 
 class ImageExtractor:
     def __init__(self, deployments_dir="deployments", results_dir="results"):
         self.deployments_dir = deployments_dir
         self.results_dir = results_dir
-        self.mapping = []
         self.images = set()
+        self.mapping = []
 
     def normalize(self, img):
         return img if ":" in img else f"{img}:latest"
 
-    def extract_images(self, data):
-        images = []
+    def extract(self, data):
+        imgs = []
 
         if isinstance(data, dict):
             for k, v in data.items():
                 if k == "image":
                     if isinstance(v, str):
-                        images.append(self.normalize(v.strip()))
+                        imgs.append(self.normalize(v.strip()))
                     elif isinstance(v, dict):
                         repo = v.get("repository")
                         tag = v.get("tag")
                         if repo and tag:
-                            images.append(f"{repo}:{tag}")
+                            imgs.append(f"{repo}:{tag}")
                 else:
-                    images.extend(self.extract_images(v))
+                    imgs.extend(self.extract(v))
 
         elif isinstance(data, list):
-            for item in data:
-                images.extend(self.extract_images(item))
+            for i in data:
+                imgs.extend(self.extract(i))
 
-        return images
+        return imgs
 
     def run(self):
         os.makedirs(self.results_dir, exist_ok=True)
@@ -59,17 +55,17 @@ class ImageExtractor:
                             if not doc:
                                 continue
 
-                            for img in self.extract_images(doc):
+                            for img in self.extract(doc):
+                                self.images.add(img)
                                 self.mapping.append({
                                     "app": app,
                                     "env": env,
                                     "image": img
                                 })
-                                self.images.add(img)
-
                 except Exception as e:
-                    logger.error(f"Failed parsing {path}: {e}")
+                    print(f"[ERROR] {path}: {e}")
 
+        # Save files
         with open(f"{self.results_dir}/images.txt", "w") as f:
             for img in sorted(self.images):
                 f.write(img + "\n")
@@ -77,7 +73,10 @@ class ImageExtractor:
         with open(f"{self.results_dir}/mapping.json", "w") as f:
             json.dump(self.mapping, f, indent=2)
 
-        logger.info(f"Extracted {len(self.images)} images")
+        # 🔥 Clean print
+        print("\n EXTRACTED IMAGES ")
+        for img in sorted(self.images):
+            print(f" - {img}")
 
 
 if __name__ == "__main__":

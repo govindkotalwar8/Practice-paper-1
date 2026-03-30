@@ -8,7 +8,6 @@ RAW_DIR="$RESULTS_DIR/raw"
 
 mkdir -p "$RAW_DIR"
 
-echo "[INFO] Starting Trivy scans..."
 
 scan_image() {
   local image="$1"
@@ -22,31 +21,35 @@ scan_image() {
   mkdir -p "$cache_dir"
 
   for attempt in 1 2; do
-    echo "[INFO] Scanning ($attempt): $image"
+    echo "[SCAN] $image (attempt $attempt)"
 
     if trivy image \
+      --quiet \
+      --no-progress \
       --format json \
       --scanners vuln \
       --severity HIGH,CRITICAL \
       --cache-dir "$cache_dir" \
       -o "$outfile" \
-      "$image"; then
+      "$image" >/dev/null 2>&1; then
+
+      echo "[DONE] $image"
       return
     fi
 
-    echo "[WARN] Retry $attempt failed for $image"
+    echo "[RETRY] $image"
     sleep 2
   done
 
-  echo "[ERROR] Final failure: $image"
+  echo "[FAILED] $image"
   echo '{"error": true}' > "$outfile"
 }
 
-# 🔥 IMPORTANT FIX: export variables
 export -f scan_image
 export RAW_DIR
 
-# Run in parallel
-xargs -a "$IMAGES_FILE" -I {} -P 5 bash -c 'scan_image "$@"' _ {}
+echo "Images to scan:"
+cat "$IMAGES_FILE"
 
-echo "[INFO] All scans completed"
+xargs -a "$IMAGES_FILE" -P 5 -I {} bash -c 'scan_image "$@"' _ {}
+
