@@ -85,9 +85,8 @@ def scan_image(image):
         "trivy", "image",
         "--format", "json",
         "--severity", "HIGH,CRITICAL",
-        "--scanners", "vuln",           # faster + avoids secret scan issues
-        "--cache-dir", cache_dir,       # isolate cache
-        "--skip-db-update",             # prevent multiple DB downloads
+        "--scanners", "vuln",     # faster + avoids secret scanning
+        "--cache-dir", cache_dir, # isolate cache to avoid lock issues
         image
     ]
 
@@ -132,7 +131,7 @@ def scan_image(image):
 def scan_images(images):
     results = {}
 
-    # Slightly safer concurrency for CI
+    # safer concurrency for CI
     with ThreadPoolExecutor(max_workers=3) as executor:
         for image, result in executor.map(scan_image, images):
             results[image] = result
@@ -184,13 +183,6 @@ def main():
     print(f"[INFO] Found {len(images)} images:\n")
     for img in images:
         print(f"  - {img}")
-
-    # ---- Download DB once ----
-    print("\n[INFO] Downloading Trivy DB once...")
-    subprocess.run(
-        ["trivy", "image", "--download-db-only"],
-        check=True
-    )
 
     # ---- Scan ----
     print("\n[INFO] Scanning images...")
