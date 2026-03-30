@@ -10,7 +10,6 @@ class ReportGenerator:
         self.raw_dir = f"{results_dir}/raw"
         self.mapping_file = f"{results_dir}/mapping.json"
 
-
     def generate_hash(self, image):
         return hashlib.sha256((image + "\n").encode()).hexdigest()[:12]
 
@@ -75,10 +74,8 @@ class ReportGenerator:
                 if image not in report[app][env]["images"]:
                     report[app][env]["images"].append(image)
 
-            except Exception as e:
-                print(f"[ERROR] Failed processing {image}: {e}")
+            except Exception:
                 continue
-
 
         output_file = f"{self.results_dir}/final_report.json"
         with open(output_file, "w") as f:
@@ -86,6 +83,7 @@ class ReportGenerator:
 
 
         if not processed_any:
+            print("No scan data processed\n")
         else:
             for app, envs in report.items():
                 print(f"APP: {app}")
@@ -100,7 +98,6 @@ class ReportGenerator:
 
         print(f"TOTAL CRITICAL: {total_critical}")
         print(f"TOTAL HIGH    : {total_high}")
-
 
 if __name__ == "__main__":
     ReportGenerator().run()
