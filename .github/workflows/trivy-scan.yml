@@ -2,7 +2,7 @@ name: Trivy Scan
 
 on:
   push:
-    branches: [ main ]
+    branches: [ trivy_scan ]
   pull_request:
 
 jobs:
@@ -25,7 +25,7 @@ jobs:
       - name: Install deps
         run: pip install pyyaml
 
-      - name: Run
+      - name: Run Scanner
         run: python scanner.py
 
       - name: Upload report

@@ -50,21 +50,25 @@ def get_images():
 
             path = os.path.join(root, file)
 
-            with open(path) as f:
-                docs = yaml.safe_load_all(f)
+            try:
+                with open(path) as f:
+                    docs = yaml.safe_load_all(f)
 
-                for doc in docs:
-                    if not doc:
-                        continue
+                    for doc in docs:
+                        if not doc:
+                            continue
 
-                    for img in extract_images(doc):
-                        if img and img.lower() != "none":
-                            mapping.append({
-                                "app": app,
-                                "env": env,
-                                "image": img
-                            })
-                            unique_images.add(img)
+                        for img in extract_images(doc):
+                            if img and img.lower() != "none":
+                                mapping.append({
+                                    "app": app,
+                                    "env": env,
+                                    "image": img
+                                })
+                                unique_images.add(img)
+
+            except Exception as e:
+                print(f"[ERROR] Failed parsing {path}: {e}")
 
     return mapping, list(unique_images)
 
@@ -142,6 +146,7 @@ def generate_report(mapping, scan_results):
 def main():
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
+    # ---- Extract ----
     print("[INFO] Extracting images...")
     mapping, images = get_images()
 
@@ -149,18 +154,29 @@ def main():
         print("[INFO] No images found")
         return
 
-    print(f"[INFO] Found {len(images)} images")
+    print(f"[INFO] Found {len(images)} images:\n")
+    for img in images:
+        print(f"  - {img}")
 
-    print("[INFO] Scanning images...")
+    # ---- Scan ----
+    print("\n[INFO] Scanning images...")
     scans = scan_images(images)
 
-    print("[INFO] Generating report...")
+    print("\n[INFO] Scan Results:")
+    for img, res in scans.items():
+        print(f"  - {img} | CRITICAL: {res['critical']} | HIGH: {res['high']}")
+
+    # ---- Report ----
+    print("\n[INFO] Generating report...")
     report = generate_report(mapping, scans)
 
     with open(f"{RESULTS_DIR}/final_report.json", "w") as f:
         json.dump(report, f, indent=2)
 
-    print("[INFO] Done!")
+    print("\n[INFO] Final Report:\n")
+    print(json.dumps(report, indent=2))
+
+    print("\n[INFO] Done!")
 
 
 if __name__ == "__main__":
