@@ -13,16 +13,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Cache Trivy DB
-        uses: actions/cache@v4
-        with:
-          path: .trivycache
-          key: trivy-db-${{ runner.os }}
-          restore-keys: |
-            trivy-db-
-
       - name: Install Trivy
         run: |
+          TRIVY_VERSION="v0.69.3"
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | \
           sudo sh -s -- -b /usr/local/bin
 
