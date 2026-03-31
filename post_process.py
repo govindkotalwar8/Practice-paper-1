@@ -1,4 +1,5 @@
 import os, json
+from collections import defaultdict
 
 
 class ReportGenerator:
@@ -13,14 +14,19 @@ class ReportGenerator:
         return c, h
 
     def run(self):
+        mapping = json.load(open("results/mapping.json"))
         images = [line.strip() for line in open("results/images.txt") if line.strip()]
 
+        report = defaultdict(lambda: defaultdict(lambda: {
+            "critical": 0,
+            "high": 0,
+            "images": []
+        }))
+
         total_c = total_h = 0
-        report = []
 
         for i, image in enumerate(images):
             path = f"results/raw/scan_{i}.json"
-
             if not os.path.exists(path):
                 continue
 
@@ -30,21 +36,32 @@ class ReportGenerator:
 
             c, h = self.count(data)
 
-            report.append({
-                "image": image,
-                "critical": c,
-                "high": h
-            })
+            # map image → app/env
+            for m in mapping:
+                if m["image"] == image:
+                    app, env = m["app"], m["env"]
+
+                    report[app][env]["critical"] += c
+                    report[app][env]["high"] += h
+
+                    if image not in report[app][env]["images"]:
+                        report[app][env]["images"].append(image)
 
             total_c += c
             total_h += h
 
         json.dump(report, open("results/final_report.json", "w"), indent=2)
 
-        for r in report:
-            print(f"{r['image']}")
-            print(f"  Critical: {r['critical']}")
-            print(f"  High    : {r['high']}\n")
+        for app in report:
+            print(f"APP: {app}")
+            for env in report[app]:
+                d = report[app][env]
+                print(f"  ENV: {env}")
+                print(f"    Critical: {d['critical']}")
+                print(f"    High    : {d['high']}")
+                for img in d["images"]:
+                    print(f"      - {img}")
+                print()
 
         print(f"TOTAL CRITICAL: {total_c}")
         print(f"TOTAL HIGH    : {total_h}")
