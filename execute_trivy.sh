@@ -1,18 +1,31 @@
-images = [line.strip() for line in open("results/images.txt") if line.strip()]
+#!/bin/bash
+set -eo pipefail
 
-lines = [
-    "#!/bin/bash\n",
-    "set -eo pipefail\n\n",
-    "mkdir -p results/raw\n\n"
-]
+RESULTS_DIR="results"
+IMAGES_FILE="$RESULTS_DIR/images.txt"
+RAW_DIR="$RESULTS_DIR/raw"
 
-for i, image in enumerate(images):
-    lines.append(
-        f"trivy image --quiet --no-progress --format json "
-        f"--scanners vuln --severity HIGH,CRITICAL "
-        f"--cache-dir .trivycache_{i} "
-        f"-o results/raw/scan_{i}.json {image}\n"
-    )
+mkdir -p "$RAW_DIR"
 
-with open("trivy_scan.sh", "w") as f:
-    f.writelines(lines)
+i=0
+
+while read -r image; do
+  [ -z "$image" ] && continue
+
+  echo "[SCAN] $image"
+
+  trivy image \
+    --quiet \
+    --no-progress \
+    --format json \
+    --scanners vuln \
+    --severity HIGH,CRITICAL \
+    --cache-dir ".trivycache_$i" \
+    -o "$RAW_DIR/scan_$i.json" \
+    "$image"
+
+  i=$((i+1))
+
+done < "$IMAGES_FILE"
+
+echo "Scan completed"
