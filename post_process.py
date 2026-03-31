@@ -3,26 +3,11 @@ from collections import defaultdict
 
 
 class ReportGenerator:
-    def count(self, data):
-        c = h = 0
-        for r in data.get("Results", []):
-            for v in r.get("Vulnerabilities", []) or []:
-                if v.get("Severity") == "CRITICAL":
-                    c += 1
-                elif v.get("Severity") == "HIGH":
-                    h += 1
-        return c, h
-
     def run(self):
         mapping = json.load(open("results/mapping.json"))
-        images = [line.strip() for line in open("results/images.txt") if line.strip()]
+        images = [i.strip() for i in open("results/images.txt") if i.strip()]
 
-        report = defaultdict(lambda: defaultdict(lambda: {
-            "critical": 0,
-            "high": 0,
-            "images": []
-        }))
-
+        report = defaultdict(lambda: defaultdict(lambda: {"critical": 0, "high": 0, "images": []}))
         total_c = total_h = 0
 
         for i, image in enumerate(images):
@@ -31,12 +16,13 @@ class ReportGenerator:
                 continue
 
             data = json.load(open(path))
-            if data.get("error"):
-                continue
 
-            c, h = self.count(data)
+            c = h = 0
+            for r in data.get("Results", []):
+                for v in r.get("Vulnerabilities", []) or []:
+                    if v.get("Severity") == "CRITICAL": c += 1
+                    elif v.get("Severity") == "HIGH": h += 1
 
-            # map image → app/env
             for m in mapping:
                 if m["image"] == image:
                     app, env = m["app"], m["env"]
