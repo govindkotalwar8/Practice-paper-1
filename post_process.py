@@ -1,11 +1,7 @@
-import os, json, hashlib
-from collections import defaultdict
+import os, json
 
 
 class ReportGenerator:
-    def generate_hash(self, image):
-        return hashlib.sha256((image + "\n").encode()).hexdigest()[:12]
-
     def count(self, data):
         c = h = 0
         for r in data.get("Results", []):
@@ -17,20 +13,14 @@ class ReportGenerator:
         return c, h
 
     def run(self):
-        mapping = json.load(open("results/mapping.json"))
-
-        report = defaultdict(lambda: defaultdict(lambda: {
-            "critical": 0,
-            "high": 0,
-            "images": []
-        }))
+        images = [line.strip() for line in open("results/images.txt") if line.strip()]
 
         total_c = total_h = 0
+        report = []
 
-        for item in mapping:
-            app, env, image = item["app"], item["env"], item["image"]
+        for i, image in enumerate(images):
+            path = f"results/raw/scan_{i}.json"
 
-            path = f"results/raw/{self.generate_hash(image)}.json"
             if not os.path.exists(path):
                 continue
 
@@ -40,25 +30,21 @@ class ReportGenerator:
 
             c, h = self.count(data)
 
-            report[app][env]["critical"] += c
-            report[app][env]["high"] += h
-            report[app][env]["images"].append(image)
+            report.append({
+                "image": image,
+                "critical": c,
+                "high": h
+            })
 
             total_c += c
             total_h += h
 
         json.dump(report, open("results/final_report.json", "w"), indent=2)
 
-        for app in report:
-            print(f"APP: {app}")
-            for env in report[app]:
-                d = report[app][env]
-                print(f"  ENV: {env}")
-                print(f"    Critical: {d['critical']}")
-                print(f"    High    : {d['high']}")
-                for img in d["images"]:
-                    print(f"      - {img}")
-                print()
+        for r in report:
+            print(f"{r['image']}")
+            print(f"  Critical: {r['critical']}")
+            print(f"  High    : {r['high']}\n")
 
         print(f"TOTAL CRITICAL: {total_c}")
         print(f"TOTAL HIGH    : {total_h}")

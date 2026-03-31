@@ -14,15 +14,15 @@ while read -r image; do
 
   echo "[SCAN] $image"
 
-  trivy image \
-    --quiet \
-    --no-progress \
-    --format json \
-    --scanners vuln \
-    --severity HIGH,CRITICAL \
-    --cache-dir ".trivycache_$i" \
-    -o "$RAW_DIR/scan_$i.json" \
-    "$image"
+trivy image \
+  --quiet \
+  --no-progress \
+  --format json \
+  --scanners vuln \
+  --severity HIGH,CRITICAL \
+  --cache-dir ".trivycache_$i" \
+  -o "$RAW_DIR/scan_$i.json" \
+  "$image" || echo "[FAILED] $image"
 
   i=$((i+1))
 
