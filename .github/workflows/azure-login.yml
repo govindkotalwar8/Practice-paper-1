@@ -25,22 +25,7 @@ jobs:
       - name: Clean Root Certificate
         working-directory: terraform/infra/akm-solutions-sandbox/0040-client-vpn
         run: |
-          echo "---- FILE CHECK ----"
-          ls -l
-          echo "---- FILE TYPE ----"
-          file vpn_root_base64.txt || true
-          echo "---- RAW CONTENT ----"
-          cat -A vpn_root_base64.txt || true
-
-          CLEAN_CERT=$(tr -d '\000' < vpn_root_base64.txt | sed '1d;$d' | tr -d '\n\r')
-
-          echo "---- LENGTH ----"
-          echo "${#CLEAN_CERT}"
-
-          if [ -z "$CLEAN_CERT" ]; then
-          echo "❌ ERROR: CLEAN_CERT is empty"
-          exit 1
-          fi
-
+          CLEAN_CERT=$(iconv -f UTF-16 -t UTF-8 vpn_root_base64.txt | sed '1d;$d' | tr -d '\n\r')
+    
           echo "::add-mask::$CLEAN_CERT"
           echo "TF_VAR_root_certificate_data=$CLEAN_CERT" >> $GITHUB_ENV
