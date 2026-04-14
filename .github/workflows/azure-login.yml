@@ -25,11 +25,6 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
-      - name: Terraform Init
-        working-directory: terraform/infra/akm-solutions-sandbox/0040-client-vpn
-        run: terraform init
-
-
       - name: Clean Root Certificate
         working-directory: terraform/infra/akm-solutions-sandbox/0040-client-vpn
         run: |
