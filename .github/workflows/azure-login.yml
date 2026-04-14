@@ -22,25 +22,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-
       - name: Clean Root Certificate
         working-directory: terraform/infra/akm-solutions-sandbox/0040-client-vpn
         run: |
-          CLEAN_CERT=$(sed '1d;$d' vpn_root_base64.txt | tr -d '\n\r')
+          CLEAN_CERT=$(tr -d '\000' < vpn_root_base64.txt | sed '1d;$d' | tr -d '\n\r')
           echo "::add-mask::$CLEAN_CERT"
           echo "TF_VAR_root_certificate_data=$CLEAN_CERT" >> $GITHUB_ENV
-
-      - name: Terraform Validate
-        working-directory: terraform/infra/akm-solutions-sandbox/0040-client-vpn
-        run: terraform validate
-
-      - name: Terraform Plan
-        working-directory: terraform/infra/akm-solutions-sandbox/0040-client-vpn
-        run: terraform plan -input=false -out=tfplan
-
-      - name: Terraform Apply
-        if: github.event_name == 'push'
-        working-directory: terraform/infra/akm-solutions-sandbox/0040-client-vpn
-        run: terraform apply -auto-approve tfplan
