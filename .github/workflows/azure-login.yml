@@ -26,6 +26,12 @@ jobs:
         working-directory: terraform/infra/akm-solutions-sandbox/0040-client-vpn
         run: |
           CLEAN_CERT=$(iconv -f UTF-16 -t UTF-8 vpn_root_base64.txt | sed '1d;$d' | tr -d '\n\r')
-    
+
           echo "::add-mask::$CLEAN_CERT"
+
+          echo "---- DEBUG OUTPUT ----"
+          echo "Length: ${#CLEAN_CERT}"
+          echo "Start: ${CLEAN_CERT:0:30}..."
+          echo "End: ...${CLEAN_CERT: -10}"
+
           echo "TF_VAR_root_certificate_data=$CLEAN_CERT" >> $GITHUB_ENV
